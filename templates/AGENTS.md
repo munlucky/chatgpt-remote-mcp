@@ -20,3 +20,25 @@ This machine is a dedicated remote workspace connected to your AI client via Mod
 3. Plan edits with minimal disruption
 4. Execute and test
 5. Report status concisely to the user
+
+## 4. Kernel Commit Standard
+When committing changes, adhere to the standard format without fabricating non-existent execution/run IDs:
+
+```text
+<type>(<scope>): <summary>
+
+요청 메시지:
+<details of user request or changes>
+
+Kernel 작업:
+- 작업 목표: <objective>
+- 프로젝트: <project name>
+- 완료 판정: 승인됨
+- Git 마감: 커밋 (or 커밋 및 푸시)
+- 검증 참조: <verification results>
+
+변경 경로 (<count>):
+- <path 1>
+- <path 2>
+```
+
