@@ -9,6 +9,7 @@ import {
   InvalidScopeError,
   InvalidTargetError,
   UnauthorizedClientError,
+  ServerError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   AuthorizationParams,
@@ -192,6 +193,7 @@ class PersistentOAuthStore implements OAuthRegisteredClientsStore {
     private readonly stateFile: string,
     private readonly accessTokenTtlSeconds: number,
     private readonly refreshTokenTtlSeconds: number,
+    private readonly maxRegisteredClients: number,
   ) {}
 
   private async ensureLoaded(): Promise<void> {
@@ -217,6 +219,30 @@ class PersistentOAuthStore implements OAuthRegisteredClientsStore {
       if (token.expiresAt <= now) {
         delete this.state.tokens[hash];
       }
+    }
+  }
+
+  private makeRoomForClientRegistration(): void {
+    if (Object.keys(this.state.clients).length < this.maxRegisteredClients) {
+      return;
+    }
+    const clientsWithTokenState = new Set(
+      Object.values(this.state.tokens).map((token) => token.clientId),
+    );
+    const inactiveClients = Object.values(this.state.clients)
+      .filter((client) => !clientsWithTokenState.has(client.client_id))
+      .sort((left, right) =>
+        (left.client_id_issued_at ?? 0) - (right.client_id_issued_at ?? 0) ||
+        left.client_id.localeCompare(right.client_id),
+      );
+    for (const client of inactiveClients) {
+      if (Object.keys(this.state.clients).length < this.maxRegisteredClients) {
+        break;
+      }
+      delete this.state.clients[client.client_id];
+    }
+    if (Object.keys(this.state.clients).length >= this.maxRegisteredClients) {
+      throw new ServerError("OAuth client registry capacity reached");
     }
   }
 
@@ -286,6 +312,7 @@ class PersistentOAuthStore implements OAuthRegisteredClientsStore {
       throw new InvalidClientMetadataError(problem);
     }
     return this.mutate(() => {
+      this.makeRoomForClientRegistration();
       this.state.clients[registered.client_id] = registered;
       return registered;
     });
@@ -515,6 +542,7 @@ export class RemoteDevOAuthProvider implements OAuthServerProvider {
       config.oauthStateFile,
       config.oauthAccessTokenTtlSeconds,
       config.oauthRefreshTokenTtlSeconds,
+      config.oauthMaxRegisteredClients,
     );
   }
 

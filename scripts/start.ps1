@@ -13,6 +13,10 @@ if (-not (Test-Path $envFile)) {
 
 Set-Location $projectDir
 
+$helperSync = (& node (Join-Path $scriptDir 'sync-commit-helper.mjs')).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Commit helper synchronization failed' }
+Write-Host ("Commit helper synchronization: " + $helperSync) -ForegroundColor DarkGray
+
 Write-Host "Starting ChatGPT Remote MCP containers..." -ForegroundColor Cyan
 $env:MCP_BUILD_ID = (& node (Join-Path $scriptDir 'build-id.mjs') $projectDir).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Source digest failed' }

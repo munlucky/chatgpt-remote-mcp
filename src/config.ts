@@ -17,6 +17,7 @@ export interface AppConfig {
   oauthAccessTokenTtlSeconds: number;
   oauthRefreshTokenTtlSeconds: number;
   oauthAuthorizationCodeTtlSeconds: number;
+  oauthMaxRegisteredClients: number;
   defaultCwd: string;
   defaultShell: string;
   maxRequestBody: string;
@@ -184,6 +185,13 @@ export function loadConfig(
       5 * 60,
       "MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS",
       60,
+    ),
+    oauthMaxRegisteredClients: parseInteger(
+      env.MCP_OAUTH_MAX_REGISTERED_CLIENTS,
+      256,
+      "MCP_OAUTH_MAX_REGISTERED_CLIENTS",
+      1,
+      10_000,
     ),
     defaultCwd,
     defaultShell:

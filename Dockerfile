@@ -40,10 +40,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/chatgpt-remote-mcp
 COPY package.json package-lock.json ./
 RUN npm ci --include=dev
-COPY tsconfig.json vitest.config.ts ./
+COPY tsconfig.json vitest.config.ts Dockerfile ./
 COPY src ./src
 COPY test ./test
-COPY scripts/*.mjs ./scripts/
+COPY scripts ./scripts
 COPY LICENSE UPSTREAM.md ./
 COPY templates/UPSTREAM-LICENSE ./UPSTREAM-LICENSE
 ARG MCP_BUILD_ID=unknown
@@ -62,14 +62,14 @@ RUN <<'SETUP'
 set -eu
 
 rm -f /etc/nginx/sites-enabled/default
-mkdir -p /etc/nginx/routes.d /etc/nginx/snippets /var/lib/chatgpt-remote-mcp /shared
+mkdir -p /etc/nginx/routes.d /etc/nginx/snippets /var/lib/chatgpt-remote-mcp /shared/nginx/routes.d
 chmod 0700 /var/lib/chatgpt-remote-mcp
 
 cat > /etc/nginx/snippets/workmachine-proxy.conf <<'NGINX'
 proxy_http_version 1.1;
 proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-For $remote_addr;
 proxy_set_header X-Forwarded-Host $host;
 proxy_set_header X-Forwarded-Proto $workmachine_forwarded_proto;
 proxy_set_header Upgrade $http_upgrade;
@@ -88,6 +88,13 @@ map $http_x_forwarded_proto $workmachine_forwarded_proto {
     default $http_x_forwarded_proto;
     ''      $scheme;
 }
+
+# cloudflared shares this service network namespace and reaches nginx over loopback.
+# Only that immediate local hop may supply Cloudflare's canonical client address.
+set_real_ip_from 127.0.0.1;
+set_real_ip_from ::1;
+real_ip_header CF-Connecting-IP;
+real_ip_recursive off;
 
 server {
     listen 2999 default_server;

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { createServer } from "node:net";
 import os from "node:os";
@@ -78,6 +78,63 @@ describe("OAuth endpoint security boundaries", () => {
 
       expect(statuses.slice(0, 20)).toEqual(Array(20).fill(201));
       expect(statuses[20]).toBe(429);
+    } finally {
+      await running.close();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+
+  it("separates OAuth rate limits by the normalized client IP behind one trusted proxy", async () => {
+    const temporaryDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "chatgpt-remote-mcp-proxy-rate-test-"),
+    );
+    const port = await reservePort();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const config = loadConfig(
+      {
+        MCP_OAUTH_ENABLED: "true",
+        MCP_OAUTH_APPROVAL_KEY: "oauth-approval-key",
+        MCP_PUBLIC_URL: baseUrl,
+        MCP_OAUTH_STATE_FILE: path.join(temporaryDirectory, "oauth-state.json"),
+        MCP_HOST: "127.0.0.1",
+        MCP_PORT: String(port),
+        MCP_DEFAULT_CWD: temporaryDirectory,
+        MCP_TRUST_PROXY_HOPS: "1",
+      },
+      temporaryDirectory,
+    );
+    const running = await startHttpServer(config, createServices(config));
+    const register = async (clientIp: string, index: number) =>
+      fetch(`${baseUrl}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": clientIp,
+        },
+        body: JSON.stringify({
+          redirect_uris: ["https://chatgpt.com/connector/oauth/proxy-rate-test"],
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          client_name: `proxy-rate-${index}`,
+          scope: "mcp:tools",
+        }),
+      });
+
+    try {
+      const distinctStatuses: number[] = [];
+      for (let index = 1; index <= 21; index += 1) {
+        distinctStatuses.push((await register(`203.0.113.${index}`, index)).status);
+      }
+      expect(distinctStatuses).toEqual(Array(21).fill(201));
+
+      const sameClientStatuses: number[] = [];
+      for (let index = 1; index <= 21; index += 1) {
+        sameClientStatuses.push((await register("198.51.100.77", 100 + index)).status);
+      }
+      expect(sameClientStatuses.slice(0, 20)).toEqual(Array(20).fill(201));
+      expect(sameClientStatuses[20]).toBe(429);
     } finally {
       await running.close();
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -164,4 +221,52 @@ describe("OAuth endpoint security boundaries", () => {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
   });
+  it("bounds persistent OAuth clients without pruning clients that still have token state", async () => {
+    const temporaryDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "chatgpt-remote-mcp-client-bound-test-"),
+    );
+    const stateFile = path.join(temporaryDirectory, "oauth-state.json");
+    const config = loadConfig(
+      {
+        MCP_OAUTH_ENABLED: "true",
+        MCP_OAUTH_APPROVAL_KEY: "oauth-approval-key",
+        MCP_PUBLIC_URL: "http://127.0.0.1:34567",
+        MCP_OAUTH_STATE_FILE: stateFile,
+        MCP_OAUTH_MAX_REGISTERED_CLIENTS: "2",
+      },
+      temporaryDirectory,
+    );
+    const provider = new RemoteDevOAuthProvider(config);
+    const metadata = (id: string, issuedAt: number) => ({
+      client_id: id,
+      client_id_issued_at: issuedAt,
+      redirect_uris: ["https://chatgpt.com/connector/oauth/client-bound-test"],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      client_name: id,
+      scope: "mcp:tools",
+    });
+    const resource = "http://127.0.0.1:34567/mcp";
+
+    try {
+      await provider.clientsStore.registerClient(metadata("inactive-oldest", 1) as Parameters<typeof provider.clientsStore.registerClient>[0]);
+      const active = await provider.clientsStore.registerClient(metadata("active", 2) as Parameters<typeof provider.clientsStore.registerClient>[0]);
+      await provider.clientsStore.issueTokenPair(active.client_id, ["mcp:tools"], resource);
+
+      const replacement = await provider.clientsStore.registerClient(metadata("replacement", 3) as Parameters<typeof provider.clientsStore.registerClient>[0]);
+      expect(await provider.clientsStore.getClient("inactive-oldest")).toBeUndefined();
+      expect(await provider.clientsStore.getClient("active")).toBeDefined();
+      expect(await provider.clientsStore.getClient("replacement")).toBeDefined();
+
+      await provider.clientsStore.issueTokenPair(replacement.client_id, ["mcp:tools"], resource);
+      await expect(
+        provider.clientsStore.registerClient(metadata("overflow", 4) as Parameters<typeof provider.clientsStore.registerClient>[0]),
+      ).rejects.toThrow("capacity reached");
+      expect(Object.keys(JSON.parse(await readFile(stateFile, "utf8")).clients)).toHaveLength(2);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
 });

@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -74,6 +74,7 @@ describe('review hardening', () => {
     const config = loadConfig({ MCP_AUTH_TOKEN: 'test' });
     expect(config.oauthAccessTokenTtlSeconds).toBe(3600);
     expect(config.oauthRefreshTokenTtlSeconds).toBe(2592000);
+    expect(config.oauthMaxRegisteredClients).toBe(256);
     const dir = await mkdtemp(path.join(os.tmpdir(),'token-migration-'));
     const file = path.join(dir,'state.json');
     const state = { version:1, clients:{ client:{client_id:'client'} }, tokens:{ secret:{type:'access'} } };
@@ -88,4 +89,66 @@ describe('review hardening', () => {
       expect(JSON.parse(await readFile(file,'utf8'))).toEqual({...state,tokens:{}});
     } finally { await rm(dir,{recursive:true,force:true}); }
   });
+  it('keeps build identity stable across LF/CRLF checkouts and changes it for source changes', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'build-id-'));
+    const createFixture = async (name: string, eol: string) => {
+      const dir = path.join(parent, name);
+      for (const subdir of ['src', 'test', 'scripts', 'templates']) await mkdir(path.join(dir, subdir), { recursive: true });
+      for (const subdir of ['src', 'test', 'scripts', 'templates']) {
+        await writeFile(path.join(dir, subdir, 'sample.txt'), `alpha${eol}beta${eol}`);
+      }
+      for (const file of ['Dockerfile', 'docker-compose.yml', 'package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts']) {
+        await writeFile(path.join(dir, file), `one${eol}two${eol}`);
+      }
+      return dir;
+    };
+    try {
+      const lf = await createFixture('lf', '\n');
+      const crlf = await createFixture('crlf', '\r\n');
+      const buildId = (dir: string) => execFileSync(process.execPath, ['scripts/build-id.mjs', dir], { encoding: 'utf8' }).trim();
+      expect(buildId(lf)).toBe(buildId(crlf));
+      await writeFile(path.join(crlf, 'src', 'sample.txt'), 'alpha\r\nbeta changed\r\n');
+      expect(buildId(lf)).not.toBe(buildId(crlf));
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps nginx forwarding canonical and synchronizes the configured runtime commit helper', async () => {
+    const dockerfile = await readFile('Dockerfile', 'utf8');
+    expect(dockerfile).toContain('real_ip_header CF-Connecting-IP;');
+    expect(dockerfile).toContain('set_real_ip_from 127.0.0.1;');
+    expect(dockerfile).toContain('proxy_set_header X-Forwarded-For $remote_addr;');
+    expect(dockerfile).not.toContain('$proxy_add_x_forwarded_for');
+
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'helper-sync-'));
+    const project = path.join(parent, 'project');
+    const shared = path.join(parent, 'shared');
+    try {
+      await mkdir(path.join(project, 'scripts'), { recursive: true });
+      await mkdir(shared, { recursive: true });
+      await copyFile('scripts/sync-commit-helper.mjs', path.join(project, 'scripts', 'sync-commit-helper.mjs'));
+      await writeFile(path.join(project, 'scripts', 'mcp-kernel-commit.mjs'), 'version one\n');
+      await writeFile(path.join(project, '.env'), `SHARED_PATH=${shared}\nMCP_COMMIT_HELPER_TARGET=/shared/bin/mcp-kernel-commit.mjs\n`);
+      const syncScript = path.join(project, 'scripts', 'sync-commit-helper.mjs');
+      expect(JSON.parse(execFileSync(process.execPath, [syncScript], { encoding: 'utf8' }))).toMatchObject({ enabled: true, matched: true });
+      expect(await readFile(path.join(shared, 'bin', 'mcp-kernel-commit.mjs'), 'utf8')).toBe('version one\n');
+      await writeFile(path.join(project, 'scripts', 'mcp-kernel-commit.mjs'), 'version two\n');
+      const stale = spawnSync(process.execPath, [syncScript, '--check'], { encoding: 'utf8' });
+      expect(stale.status).toBe(2);
+      expect(JSON.parse(stale.stdout)).toMatchObject({ enabled: true, matched: false });
+      execFileSync(process.execPath, [syncScript], { encoding: 'utf8' });
+      expect(await readFile(path.join(shared, 'bin', 'mcp-kernel-commit.mjs'), 'utf8')).toBe('version two\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('configures independent approval and probe secrets in the Windows setup helper', async () => {
+    const setup = await readFile('scripts/setup-keys.ps1', 'utf8');
+    expect(setup).toContain("Set-GeneratedSecret 'MCP_OAUTH_APPROVAL_KEY'");
+    expect(setup).toContain("Set-GeneratedSecret 'MCP_PROBE_SECRET'");
+    expect(setup).toContain('RandomNumberGenerator');
+  });
+
 });
