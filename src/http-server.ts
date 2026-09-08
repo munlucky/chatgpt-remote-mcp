@@ -9,7 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express, { type Request, type Response } from "express";
 
-import { createBearerAuth, createHostValidation } from "./auth.js";
+import { createBearerAuth, createHostValidation, tokensEqual } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
 import { createMcpServer, type McpServices } from "./mcp-server.js";
@@ -58,6 +58,9 @@ export async function startHttpServer(
   services: McpServices,
 ): Promise<RunningHttpServer> {
   const app = express();
+  if (config.oauthEnabled && (config.oauthAccessTokenTtlSeconds > 3600 || config.oauthRefreshTokenTtlSeconds > 2592000)) {
+    console.warn("OAuth migration warning: configured TTL exceeds the recommended 1h access / 30d refresh policy. Update existing .env overrides; changing TTL does not invalidate issued tokens. See docs/security-migration.md.");
+  }
   const usageLog = new UsageLog(config.usageLogDir, config.usageLogMaxBytes, config.usageLogFiles);
   app.disable("x-powered-by");
   if (config.trustProxyHops > 0) {
@@ -97,7 +100,8 @@ export async function startHttpServer(
           event: "mcp_request",
           timestamp: new Date().toISOString(),
           buildId: config.buildId || "unknown",
-          trafficClass: request.get("x-mcp-probe") === "1" ? "probe" : "usage",
+          trafficClass: response.locals.authenticatedMcp === true && config.probeSecret
+            && tokensEqual(request.get("x-mcp-probe-secret") || "", config.probeSecret) ? "probe" : "usage",
           requestId,
           httpMethod: request.method,
           rpcMethod: safeRpcName(rpcMethod(request.body), "method"),
@@ -163,6 +167,11 @@ export async function startHttpServer(
   const parseMcpJson = express.json({ limit: config.maxRequestBody });
 
   app.get("/health", (_request, response) => {
+    response.json({ status: "ok" });
+  });
+
+  app.get("/diagnostics", authenticate, (_request, response) => {
+    response.set("Cache-Control", "no-store");
     response.json({
       status: "ok",
       service: "chatgpt-remote-mcp",
@@ -179,12 +188,15 @@ export async function startHttpServer(
   });
 
   const postHandler = async (request: Request, response: Response): Promise<void> => {
+    response.locals.authenticatedMcp = !config.allowNoAuth || Boolean(config.authToken || oauthProvider);
     const setupStarted = performance.now();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    const server = createMcpServer(config, services);
+    const server = createMcpServer(config, services,
+      rpcMethod(request.body) === "tools/call" && safeRpcName(rpcToolName(request.body), "tool") !== "other"
+        ? rpcToolName(request.body) : undefined);
     const activeRequest = { server };
     activeRequests.add(activeRequest);
     activeMcpRequests += 1;

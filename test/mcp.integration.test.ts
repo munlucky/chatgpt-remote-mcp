@@ -258,11 +258,6 @@ describe("remote development MCP server", () => {
     expect(getResponse.headers.get("allow")).toBe("POST");
 
     const healthResponse = await fetch(new URL("/health", endpoint));
-    expect(await healthResponse.json()).toMatchObject({
-      status: "ok",
-      transportMode: "stateless-json",
-      activeMcpSessions: 0,
-      activeMcpRequests: 0,
-    });
+    expect(await healthResponse.json()).toEqual({ status: "ok" });
   });
 });

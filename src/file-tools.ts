@@ -33,10 +33,11 @@ export function registerFileTools(
   server: McpServer,
   config: AppConfig,
   files: FileService,
+  onlyTool?: string,
 ): void {
   const authMetadata = toolAuthMetadata(config);
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "list_directory") server.registerTool(
     "list_directory",
     {
       title: "List directory",
@@ -89,7 +90,7 @@ export function registerFileTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "stat_path") server.registerTool(
     "stat_path",
     {
       title: "Inspect path",
@@ -101,7 +102,7 @@ export function registerFileTools(
     async ({ path, cwd }) => runTool(() => files.getInfo(path, cwd)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "read_file") server.registerTool(
     "read_file",
     {
       title: "Read file",
@@ -137,7 +138,7 @@ export function registerFileTools(
       runTool(() => files.readFileChunk(path, cwd, offset, maxBytes, encoding)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "write_file") server.registerTool(
     "write_file",
     {
       title: "Write file",
@@ -182,7 +183,7 @@ export function registerFileTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "replace_in_file") server.registerTool(
     "replace_in_file",
     {
       title: "Replace text in file",
@@ -225,7 +226,7 @@ export function registerFileTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "apply_patch") server.registerTool(
     "apply_patch",
     {
       title: "Apply unified diff",
@@ -256,7 +257,7 @@ export function registerFileTools(
       runTool(() => files.applyPatch(patch, cwd, { checkOnly, reverse, threeWay })),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "upload_file") server.registerTool(
     "upload_file",
     {
       title: "Upload file chunk",
@@ -294,7 +295,7 @@ export function registerFileTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "download_file") server.registerTool(
     "download_file",
     {
       title: "Download file chunk",
@@ -324,7 +325,7 @@ export function registerFileTools(
       runTool(() => files.downloadChunk(path, cwd, offset, maxBytes)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "make_directory") server.registerTool(
     "make_directory",
     {
       title: "Create directory",
@@ -349,7 +350,7 @@ export function registerFileTools(
       runTool(() => files.makeDirectory(path, cwd, recursive, parseMode(mode))),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "copy_path") server.registerTool(
     "copy_path",
     {
       title: "Copy path",
@@ -376,7 +377,7 @@ export function registerFileTools(
       runTool(() => files.copyPath(sourcePath, destinationPath, cwd, recursive, force)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "move_path") server.registerTool(
     "move_path",
     {
       title: "Move path",
@@ -397,7 +398,7 @@ export function registerFileTools(
       runTool(() => files.movePath(sourcePath, destinationPath, cwd, overwrite)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "remove_path") server.registerTool(
     "remove_path",
     {
       title: "Remove path",
@@ -422,7 +423,7 @@ export function registerFileTools(
       runTool(() => files.removePath(path, cwd, recursive, force)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "chmod_path") server.registerTool(
     "chmod_path",
     {
       title: "Change path mode",
@@ -442,7 +443,7 @@ export function registerFileTools(
       runTool(() => files.changeMode(path, cwd, parseMode(mode) ?? 0)),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "hash_file") server.registerTool(
     "hash_file",
     {
       title: "Hash file",

@@ -29,7 +29,9 @@ export function createServices(config: AppConfig): McpServices {
   };
 }
 
-export function createMcpServer(config: AppConfig, services: McpServices): McpServer {
+export function createMcpServer(config: AppConfig, services: McpServices, onlyTool?: string): McpServer {
+  // Each stateless HTTP call owns its server/transport. Build only its requested
+  // tool schema; discovery requests and in-process clients retain the full catalog.
   const server = new McpServer(
     {
       name: "chatgpt-remote-mcp",
@@ -47,8 +49,9 @@ export function createMcpServer(config: AppConfig, services: McpServices): McpSe
     config,
     services.processManager,
     services.fileService,
+    onlyTool,
   );
-  registerFileTools(server, config, services.fileService);
-  registerBatchRead(server, config, services.fileService);
+  registerFileTools(server, config, services.fileService, onlyTool);
+  if (!onlyTool || onlyTool === "read_files") registerBatchRead(server, config, services.fileService);
   return server;
 }

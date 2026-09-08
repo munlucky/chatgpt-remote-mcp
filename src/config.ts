@@ -30,6 +30,7 @@ export interface AppConfig {
   usageLogMaxBytes?: number;
   usageLogFiles?: number;
   buildId?: string;
+  probeSecret?: string;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -139,6 +140,7 @@ export function loadConfig(
     : undefined;
 
   return {
+    probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
     usageLogDir: env.MCP_USAGE_LOG_DIR?.trim() || undefined,
     usageLogMaxBytes: parseInteger(env.MCP_USAGE_LOG_MAX_BYTES, 10 * 1024 * 1024, "MCP_USAGE_LOG_MAX_BYTES", 4096, 100 * 1024 * 1024),
     usageLogFiles: parseInteger(env.MCP_USAGE_LOG_FILES, 7, "MCP_USAGE_LOG_FILES", 1, 100),

@@ -198,6 +198,10 @@ class PersistentOAuthStore implements OAuthRegisteredClientsStore {
     this.loadPromise ??= (async () => {
       try {
         this.state = parseState(await readFile(this.stateFile, "utf8"));
+        if (Object.values(this.state.tokens).some(token => token.expiresAt > Date.now()
+          + (token.type === "access" ? this.accessTokenTtlSeconds : this.refreshTokenTtlSeconds) * 1000)) {
+          console.warn("OAuth migration warning: persisted tokens outlive the configured TTL. Existing tokens remain valid; schedule offline token invalidation using docs/security-migration.md.");
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
           throw error;

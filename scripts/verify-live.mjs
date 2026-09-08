@@ -7,9 +7,11 @@ const buildId=execFileSync(process.execPath,['scripts/build-id.mjs'],{encoding:'
 const container=execFileSync('docker',['compose','ps','-q','workmachine'],{encoding:'utf8'}).trim();
 if(!container)throw new Error('MCP service is not running');
 const inspect=JSON.parse(execFileSync('docker',['inspect',container],{encoding:'utf8'}))[0];
+const env=Object.fromEntries(inspect.Config.Env.map(value=>{const i=value.indexOf('=');return [value.slice(0,i),value.slice(i+1)]}));
+if(env.MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS!=='3600' || env.MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS!=='2592000' || !env.MCP_PROBE_SECRET)throw new Error('Live OAuth TTL or probe secret configuration is not migrated');
 const source=realpathSync(inspect.Config.Labels['com.docker.compose.project.working_dir']);
 if(source!==projectRoot)throw new Error('Live Compose project is not the target project');
 if(inspect.Config.Labels['org.opencontainers.image.revision']!==buildId)throw new Error('Live image differs from current source digest');
 const result=JSON.parse(execFileSync('docker',['exec',container,'node','/opt/chatgpt-remote-mcp/scripts/live-probe.mjs'],{encoding:'utf8'}));
 if(result.buildId!==buildId || !result.telemetry.enabled || result.telemetry.writeFailures || result.telemetry.droppedEvents)throw new Error('Live build or telemetry check failed');
-console.log(JSON.stringify({...result,composeProjectVerified:true,sourceDigestVerified:true}));
+console.log(JSON.stringify({...result,composeProjectVerified:true,sourceDigestVerified:true,oauthAccessTtlSeconds:3600,oauthRefreshTtlSeconds:2592000,probeSecretConfigured:true}));

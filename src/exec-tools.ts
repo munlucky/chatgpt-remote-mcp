@@ -20,6 +20,7 @@ export function registerExecTools(
   config: AppConfig,
   processManager: ProcessManager,
   fileService: FileService,
+  onlyTool?: string,
 ): void {
   const authMetadata = toolAuthMetadata(config);
   const environmentSchema = z
@@ -54,7 +55,7 @@ export function registerExecTools(
     .default(config.maxOutputBytes)
     .describe("Maximum retained process-output bytes included in this result.");
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "exec_command") server.registerTool(
     "exec_command",
     {
       title: "Execute command",
@@ -122,7 +123,7 @@ export function registerExecTools(
       }),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "run_script") server.registerTool(
     "run_script",
     {
       title: "Run script",
@@ -203,7 +204,7 @@ export function registerExecTools(
       }),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "write_stdin") server.registerTool(
     "write_stdin",
     {
       title: "Write to process stdin",
@@ -249,7 +250,7 @@ export function registerExecTools(
       }),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "read_process") server.registerTool(
     "read_process",
     {
       title: "Read process output",
@@ -284,7 +285,7 @@ export function registerExecTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "terminate_process") server.registerTool(
     "terminate_process",
     {
       title: "Terminate process",
@@ -315,7 +316,7 @@ export function registerExecTools(
       ),
   );
 
-  server.registerTool(
+  if (!onlyTool || onlyTool === "list_processes") server.registerTool(
     "list_processes",
     {
       title: "List managed processes",

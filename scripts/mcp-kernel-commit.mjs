@@ -66,6 +66,9 @@ const DENIED_PATTERNS = [
 
 function isPathDenied(filePath) {
   const normalized = filePath.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (normalized === '.env.example' || normalized.endsWith('/.env.example')) {
+    return false;
+  }
   return DENIED_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
