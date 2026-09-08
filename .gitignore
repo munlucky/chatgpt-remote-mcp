@@ -29,3 +29,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+node_modules/
+dist/
+docs/runtime/
+coverage/
+.*-oauth-state.json

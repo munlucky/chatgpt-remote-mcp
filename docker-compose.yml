@@ -1,13 +1,14 @@
+name: "${COMPOSE_PROJECT_NAME:-remote-mcp}"
 services:
   workmachine:
     build:
       context: .
       args:
         TIMEZONE: "${TZ:-UTC}"
-        COKACREMOTE_REF: "${COKACREMOTE_REF:-main}"
-    image: "${WORKMACHINE_IMAGE:-workmachine:local}"
-    container_name: workmachine
-    hostname: workmachine
+        MCP_BUILD_ID: "${MCP_BUILD_ID:-unknown}"
+    image: "${WORKMACHINE_IMAGE:-chatgpt-remote-mcp:local}"
+    container_name: "${MCP_CONTAINER_NAME:-mcp-server}"
+    hostname: "${MCP_HOSTNAME:-mcp-server}"
     restart: unless-stopped
     environment:
       TZ: "${TZ:-UTC}"
@@ -18,22 +19,59 @@ services:
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-}"
       MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "${MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS:-2592000}"
       MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS: "${MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS:-31536000}"
+      CODEX_HOME: "${CODEX_PROFILE_TARGET:?Set CODEX_PROFILE_TARGET in .env}"
+      MOON_RELAY_KERNEL_HOME: "${KERNEL_PROFILE_TARGET:?Set KERNEL_PROFILE_TARGET in .env}"
+      MCP_USAGE_LOG_DIR: /var/log/mcp-usage
+      MCP_USAGE_LOG_MAX_BYTES: "${MCP_USAGE_LOG_MAX_BYTES:-10485760}"
+      MCP_USAGE_LOG_FILES: "${MCP_USAGE_LOG_FILES:-7}"
+      MCP_PROBE_CWD: "${MCP_PROBE_CWD:-/opt/chatgpt-remote-mcp}"
+      MCP_COMMIT_HELPER_TARGET: "${MCP_COMMIT_HELPER_TARGET:-}"
+      MCP_OAUTH_STATE_FILE: "${MCP_STATE_DIR:-/var/lib/chatgpt-remote-mcp}/oauth-state.json"
+      MCP_OAUTH_APPROVAL_KEY_FILE: "${MCP_STATE_DIR:-/var/lib/chatgpt-remote-mcp}/oauth-approval-key"
     volumes:
+      - type: volume
+        source: workmachine-home
+        target: /root
       - type: bind
         source: "${SHARED_PATH:?Set SHARED_PATH in .env}"
         target: /shared
       - type: bind
         source: "${SHARED_PATH:?Set SHARED_PATH in .env}"
-        target: /c/dev
+        target: "${WORKSPACE_ALIAS:-/workspace}"
       - type: volume
-        source: cokacremote-state
-        target: /var/lib/cokacremote
+        source: chatgpt-remote-mcp-state
+        target: "${MCP_STATE_DIR:-/var/lib/chatgpt-remote-mcp}"
+      - type: bind
+        source: "${HOST_USER_HOME:?Set HOST_USER_HOME in .env}"
+        target: "${HOST_HOME_ALIAS:-/host/home}"
+      - type: bind
+        source: "${HOST_USER_HOME:?Set HOST_USER_HOME in .env}"
+        target: "${HOST_HOME_SECONDARY_ALIAS:-/host/user}"
+      - type: bind
+        source: "${CODEX_PROFILE_PATH:?Set CODEX_PROFILE_PATH in .env}"
+        target: "${CODEX_PROFILE_TARGET:?Set CODEX_PROFILE_TARGET in .env}"
+      - type: bind
+        source: "${KERNEL_PROFILE_PATH:?Set KERNEL_PROFILE_PATH in .env}"
+        target: "${KERNEL_PROFILE_TARGET:?Set KERNEL_PROFILE_TARGET in .env}"
+      - type: volume
+        source: mcp-usage
+        target: /var/log/mcp-usage
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     stop_grace_period: 30s
 
   cloudflared:
     image: cloudflare/cloudflared:latest
-    container_name: chatgpt-cloudflared
+    container_name: "${CLOUDFLARED_CONTAINER_NAME:-mcp-tunnel}"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     network_mode: "service:workmachine"
     depends_on:
       workmachine:
@@ -46,4 +84,9 @@ services:
       - "${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}"
 
 volumes:
-  cokacremote-state:
+  chatgpt-remote-mcp-state:
+    name: "${MCP_STATE_VOLUME:?Set MCP_STATE_VOLUME in .env}"
+  mcp-usage:
+    name: "${MCP_USAGE_VOLUME:?Set MCP_USAGE_VOLUME in .env}"
+  workmachine-home:
+    name: "${MCP_HOME_VOLUME:?Set MCP_HOME_VOLUME in .env}"

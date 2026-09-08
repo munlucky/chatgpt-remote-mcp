@@ -1,179 +1,39 @@
-# ChatGPT Remote MCP Server (Docker + Cloudflare Tunnel)
+# ChatGPT Remote MCP
 
-> Turn ChatGPT into a local coding agent on your machine via Model Context Protocol (MCP) and Cloudflare Tunnel.
+A self-hosted MCP development server with Docker, Cloudflare Tunnel, OAuth,
+bounded file operations, process management and persistent usage telemetry.
+The server is built from this repository's `src/` and npm lockfile.
 
-[![Docker](https://img.shields.io/badge/Docker-WSL2%20%7C%20Linux-blue?logo=docker)](https://www.docker.com/)
-[![MCP](https://img.shields.io/badge/Protocol-Model%20Context%20Protocol-8A2BE2)](https://modelcontextprotocol.io/)
-[![Cloudflare](https://img.shields.io/badge/Tunnel-Cloudflare%20Zero%20Trust-F38020?logo=cloudflare)](https://one.dash.cloudflare.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+## Setup
 
----
+1. Copy `.env.example` to `.env` or run `scripts/setup-keys.ps1`.
+2. Replace placeholder host paths, domain and credentials in `.env`.
+3. Configure your tunnel origin to `http://localhost:2999`.
+4. Run `scripts/start.ps1` from PowerShell.
+5. Connect your MCP client to the configured public URL followed by `/mcp`.
 
-## 🌟 Overview
+`.env.example` contains examples only. Actual paths, mount aliases, container
+names, volume names, timezone and credentials belong in ignored `.env`.
+Preserve existing volume names during migration to retain OAuth and user data.
+The setup helper generates an approval key; it does not register OAuth clients.
 
-This repository provides a production-ready, production-tested template for connecting **ChatGPT** (via Actions / Custom MCP Connectors) directly to your local development environment using Docker and Cloudflare Tunnel.
+## Development and verification
 
-Unlike basic setups that frequently fail or suffer from usability friction, this template solves the four most common production issues:
-1. **1-Hour Session Expiration Fixed**: Configured with long-lived access tokens (30 days) and automated background refresh tokens (1 year) so you don't have to re-enter your approval key every hour.
-2. **Cloudflare DCR 403 Bypass**: Solves the OpenAI Dynamic Client Registration 403 blocked error with pre-registered OAuth client credentials.
-3. **ChatGPT Connector-Specific Callback Support**: Supports ChatGPT's unique `/connector/oauth/<CONNECTOR_ID>` callback endpoints.
-4. **Windows Docker (WSL2) File I/O Optimization**: Pre-configures Git index parallelization and minimal stat checks to eliminate file system latency over host bind mounts.
+- `npm ci`, `npm run typecheck`, `npm test`, `npm run build`
+- `npm run integration:docker`: isolated Linux tests/build and live deployment checks
+- `npm run post-deploy:verify`: source digest and authenticated public MCP checks
+- `scripts/usage-report.ps1 -Hours 24`: aggregate actual usage, excluding marked probes
 
----
+The MCP server publishes 21 tools, including bounded `read_files` batching.
+Existing filesystem and process tools remain available. The container has full
+access to configured mounts; protect credentials and select mounts deliberately.
 
-## 🏗️ Architecture
+See [performance and operations](docs/performance.md) for logging, monitoring,
+rollback and deployment details. Runtime reports under `docs/runtime/` are
+local and excluded from Git and Docker build inputs.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       ChatGPT Web / App                     │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ HTTPS (OAuth 2.1 PKCE)
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│             Cloudflare Edge (SSL & DDoS Protection)         │
-│               https://mcp.yourdomain.com                    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Outbound Encrypted Tunnel
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Local Host Machine (Docker)                 │
-│                                                             │
-│   ┌─────────────────────┐       ┌───────────────────────┐   │
-│   │ chatgpt-cloudflared │ ◄───► │  workmachine          │   │
-│   │ (Tunnel Client)     │       │  (Nginx + MCP Server) │   │
-│   └─────────────────────┘       └───────────┬───────────┘   │
-│                                             │               │
-│                                             ▼               │
-│                                 /shared (Host Workspace)    │
-└─────────────────────────────────────────────────────────────┘
-```
+## License and provenance
 
----
-
-## 📋 Prerequisites
-
-- **Docker Desktop** installed and running (WSL2 backend recommended for Windows).
-- A free **Cloudflare** account with a domain configured in Cloudflare DNS.
-- **ChatGPT Plus / Team / Enterprise** account supporting custom Connectors/Actions.
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone the Repository
-```powershell
-git clone https://github.com/your-username/chatgpt-remote-mcp.git
-cd chatgpt-remote-mcp
-```
-
-### 2. Run Setup Helper
-Run the provided PowerShell setup script to automatically copy `.env.example` to `.env` and generate a cryptographically strong 32-byte OAuth approval key:
-```powershell
-.\scripts\setup-keys.ps1
-```
-
-### 3. Create Cloudflare Tunnel
-1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) > **Networks** > **Tunnels**.
-2. Click **Create a Tunnel** (select Cloudflared).
-3. Name your tunnel (e.g. `chatgpt-mcp`).
-4. In the installation command, copy your **Tunnel Token** (the string following `--token`).
-5. Under the **Public Hostname** tab:
-   - **Subdomain / Domain**: e.g., `mcp` / `yourdomain.com` (full URL: `https://mcp.yourdomain.com`)
-   - **Service Type**: `HTTP`
-   - **URL**: `localhost:2999`
-6. Save the tunnel.
-
-### 4. Configure `.env`
-Open `.env` in your editor and update the required values:
-```env
-SHARED_PATH=C:/workspace                          # Path to your host workspace folder
-MCP_PUBLIC_URL=https://mcp.yourdomain.com         # Your public Cloudflare Tunnel URL
-CLOUDFLARE_TUNNEL_TOKEN=your_tunnel_token_here    # Your Cloudflare Tunnel token
-MCP_OAUTH_APPROVAL_KEY=your_generated_hex_key     # Auto-generated by setup-keys.ps1
-```
-
-### 5. Start the Containers
-```powershell
-.\scripts\start.ps1
-```
-The script will start the containers and verify that the public health check endpoint (`https://mcp.yourdomain.com/health`) returns `{"status":"ok"}`.
-
----
-
-## 🔗 Connecting with ChatGPT
-
-1. In ChatGPT, click your profile > **Settings** > **Connected Apps** (or **Tools / Connectors**).
-2. Click **Add Connector / Create New**.
-3. **MCP Server URL**: `https://mcp.yourdomain.com/mcp`
-4. **Authentication**: Select **OAuth 2.0 / 2.1**.
-
-### Handling Dynamic Client Registration (DCR 403)
-If ChatGPT displays `Dynamic client registration failed: registration endpoint returned 403`:
-1. In the ChatGPT connector setup, select **Advanced OAuth Settings** (Manual configuration).
-2. Use the **Client ID** and **Client Secret** printed by `.\scripts\setup-keys.ps1`.
-3. Save and click **Log in with account**.
-4. On the authorization page, paste your `MCP_OAUTH_APPROVAL_KEY` and click **Approve**.
-
----
-
-## 🛠️ Management Scripts
-
-| Script | Description |
-| :--- | :--- |
-| `.\scripts\setup-keys.ps1` | Generates 32-byte secret approval keys and OAuth client credentials. |
-| `.\scripts\start.ps1` | Starts the Docker containers in the background and waits for healthcheck. |
-| `.\scripts\stop.ps1` | Gracefully stops the containers. |
-| `.\scripts\status.ps1` | Inspects container status, curls the public `/health` endpoint, and prints logs. |
-
----
-
-## 💡 Production Troubleshooting
-
-<details>
-<summary><b>1. Why does ChatGPT ask me to log in again after 1 hour?</b></summary>
-
-By default, standard OAuth access tokens expire in 3600 seconds (1 hour). If the registered client does not include `refresh_token` in `grant_types`, ChatGPT cannot renew the session automatically.
-
-**Solution included in this template**:
-- We configure `MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS=2592000` (30 days).
-- We configure `MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS=31536000` (1 year).
-- In `oauth-state.json`, `grant_types` includes both `"authorization_code"` and `"refresh_token"`.
-</details>
-
-<details>
-<summary><b>2. Why is Git / File I/O slow on Windows Docker?</b></summary>
-
-Docker on Windows accesses NTFS files across the WSL2 9p/virtiofs bridge. Scanning large folders like `node_modules` during `git status` creates hundreds of cross-boundary `stat()` calls.
-
-**Solution included in this template**:
-The Dockerfile entrypoint automatically sets:
-```bash
-git config --global core.preloadindex true
-git config --global core.checkStat minimal
-git config --global gc.auto 0
-```
-</details>
-
-<details>
-<summary><b>3. Unregistered redirect_uri error</b></summary>
-
-Each ChatGPT connector instance generates a unique callback URI formatted as `https://chatgpt.com/connector/oauth/<CONNECTOR_ID>`. Make sure this callback URL is included in your client's `redirect_uris` list in `/var/lib/cokacremote/oauth-state.json`.
-</details>
-
----
-
-## 🔒 Security Best Practices
-
-> [!WARNING]
-> The MCP server provides root-level shell execution and file modification inside the Docker container. Always protect your approval key and Cloudflare tunnel token.
-
-- **Never commit `.env` or `oauth-state.json`**: These files contain persistent secrets and tokens.
-- **Use Dedicated Workspace**: Bind-mount only the project folder (`SHARED_PATH`) that the AI agent needs access to, rather than your entire hard drive.
-- **Cloudflare Access Policy**: Optionally add Cloudflare Access rules or IP filters to restrict traffic only to OpenAI egress IP ranges.
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-Based on the `cokacremote` project by kstost.
+MIT. This project incorporates code from `kstost/cokacremote`.
+See [upstream provenance](UPSTREAM.md) and the preserved
+[upstream license](templates/UPSTREAM-LICENSE).

@@ -11,7 +11,9 @@ $ErrorActionPreference = "Stop"
 Write-Host "Registering Redirect URI: $RedirectUri" -ForegroundColor Cyan
 
 # Check if workmachine container is running
-$containerRunning = docker ps --filter "name=workmachine" --format "{{.Names}}"
+$projectDir = Split-Path -Parent $PSScriptRoot
+Set-Location $projectDir
+$containerRunning = docker compose ps -q workmachine
 if (-not $containerRunning) {
     Write-Error "Container 'workmachine' is not running. Please start it with .\scripts\start.ps1 first."
 }
@@ -19,7 +21,8 @@ if (-not $containerRunning) {
 # Update oauth-state.json using node inside workmachine
 $nodeScript = @"
 const fs = require('fs');
-const statePath = '/var/lib/cokacremote/oauth-state.json';
+const statePath = process.env.MCP_OAUTH_STATE_FILE;
+if (!statePath) throw new Error('MCP_OAUTH_STATE_FILE is required');
 let state = { version: 1, clients: {}, tokens: {} };
 try {
     state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
@@ -50,7 +53,7 @@ if (updated) {
 }
 "@
 
-docker exec workmachine node -e "$nodeScript" "$RedirectUri"
+docker compose exec -T workmachine node -e "$nodeScript" "$RedirectUri"
 Write-Host "Restarting workmachine to reload state in memory..." -ForegroundColor Yellow
-docker restart workmachine > $null
+docker compose restart workmachine > $null
 Write-Host "Done! You can now authorize the connector in ChatGPT." -ForegroundColor Green

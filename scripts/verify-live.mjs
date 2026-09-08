@@ -1,0 +1,15 @@
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+const projectRoot=realpathSync(fileURLToPath(new URL('..',import.meta.url)));
+process.chdir(projectRoot);
+const buildId=execFileSync(process.execPath,['scripts/build-id.mjs'],{encoding:'utf8'}).trim();
+const container=execFileSync('docker',['compose','ps','-q','workmachine'],{encoding:'utf8'}).trim();
+if(!container)throw new Error('MCP service is not running');
+const inspect=JSON.parse(execFileSync('docker',['inspect',container],{encoding:'utf8'}))[0];
+const source=realpathSync(inspect.Config.Labels['com.docker.compose.project.working_dir']);
+if(source!==projectRoot)throw new Error('Live Compose project is not the target project');
+if(inspect.Config.Labels['org.opencontainers.image.revision']!==buildId)throw new Error('Live image differs from current source digest');
+const result=JSON.parse(execFileSync('docker',['exec',container,'node','/opt/chatgpt-remote-mcp/scripts/live-probe.mjs'],{encoding:'utf8'}));
+if(result.buildId!==buildId || !result.telemetry.enabled || result.telemetry.writeFailures || result.telemetry.droppedEvents)throw new Error('Live build or telemetry check failed');
+console.log(JSON.stringify({...result,composeProjectVerified:true,sourceDigestVerified:true}));

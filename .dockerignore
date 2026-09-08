@@ -1,0 +1,16 @@
+*
+!Dockerfile
+!package.json
+!package-lock.json
+!tsconfig.json
+!vitest.config.ts
+!src/
+!src/**
+!test/
+!test/**
+!scripts/
+!scripts/*.mjs
+!templates/
+!templates/**
+!LICENSE
+!UPSTREAM.md

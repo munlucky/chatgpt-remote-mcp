@@ -1,0 +1,7 @@
+import { execFileSync } from 'node:child_process';
+execFileSync(process.execPath,['scripts/check-public-config.mjs'],{stdio:'inherit'});
+const buildId=execFileSync(process.execPath,['scripts/build-id.mjs'],{encoding:'utf8'}).trim();
+execFileSync('docker',['build','--target','development','--build-arg',`MCP_BUILD_ID=${buildId}`,'-t','chatgpt-remote-mcp:verify','.'],{stdio:'inherit'});
+execFileSync('docker',['run','--rm','--entrypoint','/bin/bash','-w','/opt/chatgpt-remote-mcp','chatgpt-remote-mcp:verify','-c','npm run typecheck && npm test && npm run build'],{stdio:'inherit'});
+console.log(JSON.stringify({verified:true,buildId,checks:['typecheck','full-test-suite','build']}));
+execFileSync(process.execPath,['scripts/verify-live.mjs'],{stdio:'inherit'});

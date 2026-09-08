@@ -8,7 +8,7 @@ $projectDir = Split-Path -Parent $scriptDir
 $envFile = Join-Path $projectDir ".env"
 
 Write-Host "`n=== Container Status ===" -ForegroundColor Cyan
-docker ps --filter "name=workmachine" --filter "name=chatgpt-cloudflared" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker compose --project-directory $projectDir -f (Join-Path $projectDir 'docker-compose.yml') ps
 
 if (Test-Path $envFile) {
     $mcpUrlLine = Get-Content $envFile | Where-Object { $_ -match "^MCP_PUBLIC_URL=(.+)" }
@@ -27,4 +27,4 @@ if (Test-Path $envFile) {
 }
 
 Write-Host "`n=== Recent MCP Server Logs ===" -ForegroundColor Cyan
-docker logs --tail 15 workmachine
+docker compose --project-directory $projectDir -f (Join-Path $projectDir 'docker-compose.yml') logs --tail 15 workmachine

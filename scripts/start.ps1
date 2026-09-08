@@ -14,17 +14,28 @@ if (-not (Test-Path $envFile)) {
 Set-Location $projectDir
 
 Write-Host "Starting ChatGPT Remote MCP containers..." -ForegroundColor Cyan
-docker compose up -d
+$env:MCP_BUILD_ID = (& node (Join-Path $scriptDir 'build-id.mjs') $projectDir).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Source digest failed' }
+docker compose build workmachine
+if ($LASTEXITCODE -ne 0) { throw 'Image build failed; running service retained' }
+$containerId = docker compose ps -q workmachine
+if ($containerId) {
+    docker compose exec -T workmachine node /opt/chatgpt-remote-mcp/scripts/live-probe.mjs --preflight
+    if ($LASTEXITCODE -ne 0) { throw 'Active jobs or failed preflight; service retained' }
+}
+docker compose up -d --force-recreate
+if ($LASTEXITCODE -ne 0) { throw 'Container startup failed' }
 
 Write-Host "Waiting for service health check..." -ForegroundColor Yellow
-$timeout = 30
+$timeout = 120
 $elapsed = 0
 $healthy = $false
 
 while ($elapsed -lt $timeout) {
     Start-Sleep -Seconds 2
     $elapsed += 2
-    $status = docker inspect --format '{{json .State.Health.Status}}' workmachine 2>$null
+    $containerId = docker compose ps -q workmachine
+    $status = docker inspect --format '{{json .State.Health.Status}}' $containerId 2>$null
     if ($status -eq '"healthy"') {
         $healthy = $true
         break
