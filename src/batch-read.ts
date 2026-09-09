@@ -4,7 +4,7 @@ import type { AppConfig } from "./config.js";
 import type { FileService } from "./file-service.js";
 import { errorMessage } from "./errors.js";
 import { runTool } from "./tool-result.js";
-import { TOOL_ANNOTATIONS, toolAuthMetadata } from "./tool-metadata.js";
+import { createCachedToolRegistrar, TOOL_ANNOTATIONS, toolAuthMetadata, type CachedToolRegistrar } from "./tool-metadata.js";
 
 export async function readFiles(files: FileService, paths: string[], cwd: string | undefined, maxBytes: number) {
   const results: Record<string, unknown>[] = new Array(paths.length);
@@ -32,4 +32,13 @@ export function registerBatchRead(server: McpServer, config: AppConfig, files: F
     annotations: TOOL_ANNOTATIONS.readOnlyClosed,
     _meta: toolAuthMetadata(config),
   }, async ({ paths, cwd, maxBytesPerFile }) => runTool(() => readFiles(files, paths, cwd, maxBytesPerFile)));
+}
+
+export function createBatchReadRegistrar(
+  config: AppConfig,
+  files: FileService,
+): CachedToolRegistrar {
+  return createCachedToolRegistrar((collector) =>
+    registerBatchRead(collector, config, files),
+  );
 }

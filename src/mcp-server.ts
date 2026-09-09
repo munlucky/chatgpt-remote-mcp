@@ -1,37 +1,53 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import type { AppConfig } from "./config.js";
-import { registerExecTools } from "./exec-tools.js";
+import { createExecToolRegistrar } from "./exec-tools.js";
 import { FileService } from "./file-service.js";
-import { registerFileTools } from "./file-tools.js";
+import { createFileToolRegistrar } from "./file-tools.js";
 import { ProcessManager } from "./process-manager.js";
-import { registerBatchRead } from "./batch-read.js";
+import type { CachedToolRegistrar } from "./tool-metadata.js";
+import { createBatchReadRegistrar } from "./batch-read.js";
 
 export interface McpServices {
   processManager: ProcessManager;
   fileService: FileService;
+  registerTools: CachedToolRegistrar;
 }
 
 export function createServices(config: AppConfig): McpServices {
-  return {
-    processManager: new ProcessManager({
-      maxRetainedOutputBytes: config.maxRetainedProcessOutputBytes,
-      processRetentionMs: config.processRetentionMs,
-      maxProcesses: config.maxProcesses,
-      defaultMaxOutputBytes: config.maxOutputBytes,
-    }),
-    fileService: new FileService({
-      defaultCwd: config.defaultCwd,
-      maxChunkBytes: config.maxFileChunkBytes,
-      maxEditFileBytes: config.maxEditFileBytes,
-      maxOutputBytes: config.maxOutputBytes,
-    }),
+  const processManager = new ProcessManager({
+    maxRetainedOutputBytes: config.maxRetainedProcessOutputBytes,
+    maxTotalRetainedOutputBytes: config.maxTotalRetainedProcessOutputBytes,
+    processRetentionMs: config.processRetentionMs,
+    maxProcesses: config.maxProcesses,
+    maxRunningProcesses: config.maxRunningProcesses,
+    defaultReadOutputBytes: config.defaultProcessOutputBytes,
+    maxReadOutputBytes: config.maxOutputBytes,
+  });
+  const fileService = new FileService({
+    defaultCwd: config.defaultCwd,
+    maxChunkBytes: config.maxFileChunkBytes,
+    maxEditFileBytes: config.maxEditFileBytes,
+    maxOutputBytes: config.maxOutputBytes,
+  });
+
+  // Build all reusable Zod schemas, metadata objects and handler closures once.
+  // Request-local McpServer instances still receive independent registrations.
+  const execTools = createExecToolRegistrar(config, processManager, fileService);
+  const fileTools = createFileToolRegistrar(config, fileService);
+  const batchRead = createBatchReadRegistrar(config, fileService);
+  const registerTools: CachedToolRegistrar = (server, onlyTool) => {
+    execTools(server, onlyTool);
+    fileTools(server, onlyTool);
+    batchRead(server, onlyTool);
   };
+
+  return { processManager, fileService, registerTools };
 }
 
 export function createMcpServer(config: AppConfig, services: McpServices, onlyTool?: string): McpServer {
-  // Each stateless HTTP call owns its server/transport. Build only its requested
-  // tool schema; discovery requests and in-process clients retain the full catalog.
+  // Each stateless HTTP call owns its server/transport. Reuse startup-built tool
+  // definitions while installing only the requested tool for direct calls.
   const server = new McpServer(
     {
       name: "chatgpt-remote-mcp",
@@ -44,14 +60,6 @@ export function createMcpServer(config: AppConfig, services: McpServices, onlyTo
     },
   );
 
-  registerExecTools(
-    server,
-    config,
-    services.processManager,
-    services.fileService,
-    onlyTool,
-  );
-  registerFileTools(server, config, services.fileService, onlyTool);
-  if (!onlyTool || onlyTool === "read_files") registerBatchRead(server, config, services.fileService);
+  services.registerTools(server, onlyTool);
   return server;
 }

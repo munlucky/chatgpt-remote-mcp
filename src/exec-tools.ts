@@ -5,14 +5,49 @@ import type { AppConfig } from "./config.js";
 import { FileService } from "./file-service.js";
 import { ProcessManager } from "./process-manager.js";
 import { runScript } from "./script-runner.js";
-import { runTool } from "./tool-result.js";
-import { TOOL_ANNOTATIONS, toolAuthMetadata } from "./tool-metadata.js";
+import { runTool, type SuccessResultFormatter } from "./tool-result.js";
+import {
+  createCachedToolRegistrar,
+  TOOL_ANNOTATIONS,
+  toolAuthMetadata,
+  type CachedToolRegistrar,
+} from "./tool-metadata.js";
 
 function processResult(result: Awaited<ReturnType<ProcessManager["read"]>>): Record<string, unknown> {
   return {
     ...result,
     completed: !result.running,
   };
+}
+
+const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
+  contentText(data) {
+    const output = typeof data.output === "string" ? data.output : "";
+    const summary = JSON.stringify({
+      sessionId: data.sessionId,
+      running: data.running,
+      completed: data.completed,
+      exitCode: data.exitCode,
+      signal: data.signal,
+      timedOut: data.timedOut,
+      error: data.error,
+      nextSeq: data.nextSeq,
+      hasMore: data.hasMore,
+      totalOutputBytes: data.totalOutputBytes,
+      droppedOutputBytes: data.droppedOutputBytes,
+    });
+    return output.length > 0 ? `${summary}\n${output}` : summary;
+  },
+  structuredContent(data) {
+    const { output: _combinedOutput, ...structured } = data;
+    return structured;
+  },
+};
+
+function runProcessTool(
+  operation: () => Promise<Record<string, unknown>> | Record<string, unknown>,
+) {
+  return runTool(operation, PROCESS_RESULT_FORMATTER);
 }
 
 export function registerExecTools(
@@ -52,7 +87,7 @@ export function registerExecTools(
     .int()
     .min(16 * 1024)
     .max(config.maxOutputBytes)
-    .default(config.maxOutputBytes)
+    .default(config.defaultProcessOutputBytes)
     .describe("Maximum retained process-output bytes included in this result.");
 
   if (!onlyTool || onlyTool === "exec_command") server.registerTool(
@@ -103,7 +138,7 @@ export function registerExecTools(
       yieldTimeMs,
       maxOutputBytes,
     }) =>
-      runTool(async () => {
+      runProcessTool(async () => {
         const cwd = fileService.resolve(".", workdir);
         const executable = shell || config.defaultShell;
         const sessionId = processManager.start({
@@ -185,7 +220,7 @@ export function registerExecTools(
       maxOutputBytes,
       keepScript,
     }) =>
-      runTool(async () => {
+      runProcessTool(async () => {
         const result = await runScript(processManager, {
           runtime,
           script,
@@ -236,7 +271,7 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async ({ sessionId, chars, closeStdin, afterSeq, yieldTimeMs, maxOutputBytes }) =>
-      runTool(async () => {
+      runProcessTool(async () => {
         await processManager.write(sessionId, chars, closeStdin);
         if (closeStdin) {
           await processManager.waitForExit(sessionId, yieldTimeMs);
@@ -274,7 +309,7 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async ({ sessionId, afterSeq, waitMs, maxOutputBytes }) =>
-      runTool(async () =>
+      runProcessTool(async () =>
         processResult(
           await processManager.read(sessionId, {
             afterSeq,
@@ -311,7 +346,7 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async ({ sessionId, signal, graceMs }) =>
-      runTool(async () =>
+      runProcessTool(async () =>
         processResult(await processManager.terminate(sessionId, signal, graceMs)),
       ),
   );
@@ -326,5 +361,15 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async () => runTool(() => ({ processes: processManager.list() })),
+  );
+}
+
+export function createExecToolRegistrar(
+  config: AppConfig,
+  processManager: ProcessManager,
+  fileService: FileService,
+): CachedToolRegistrar {
+  return createCachedToolRegistrar((collector) =>
+    registerExecTools(collector, config, processManager, fileService),
   );
 }

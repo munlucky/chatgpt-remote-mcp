@@ -4,7 +4,12 @@ import * as z from "zod/v4";
 import type { AppConfig } from "./config.js";
 import { FileService } from "./file-service.js";
 import { runTool } from "./tool-result.js";
-import { TOOL_ANNOTATIONS, toolAuthMetadata } from "./tool-metadata.js";
+import {
+  createCachedToolRegistrar,
+  TOOL_ANNOTATIONS,
+  toolAuthMetadata,
+  type CachedToolRegistrar,
+} from "./tool-metadata.js";
 
 const cwdSchema = z
   .string()
@@ -461,5 +466,14 @@ export function registerFileTools(
     },
     async ({ path, cwd, algorithm }) =>
       runTool(() => files.hashFile(path, cwd, algorithm)),
+  );
+}
+
+export function createFileToolRegistrar(
+  config: AppConfig,
+  files: FileService,
+): CachedToolRegistrar {
+  return createCachedToolRegistrar((collector) =>
+    registerFileTools(collector, config, files),
   );
 }

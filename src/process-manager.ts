@@ -3,17 +3,15 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isAscii } from "node:buffer";
 
 import { errorMessage } from "./errors.js";
+import {
+  IndexedProcessOutputBuffer,
+  type ProcessOutputStream,
+} from "./process-output-buffer.js";
 
 const OUTPUT_CHUNK_BYTES = 16 * 1024;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-export type ProcessOutputStream = "stdout" | "stderr";
-
-interface OutputChunk {
-  seq: number;
-  stream: ProcessOutputStream;
-  data: Buffer;
-}
+export type { ProcessOutputStream } from "./process-output-buffer.js";
 
 interface ManagedProcess {
   sessionId: string;
@@ -26,12 +24,9 @@ interface ManagedProcess {
   signal: NodeJS.Signals | null | undefined;
   error: string | undefined;
   timedOut: boolean;
-  chunks: OutputChunk[];
+  outputBuffer: IndexedProcessOutputBuffer;
   pendingOutput: Record<ProcessOutputStream, Buffer>;
-  retainedBytes: number;
   totalOutputBytes: number;
-  droppedOutputBytes: number;
-  nextSeq: number;
   waiters: Set<() => void>;
   exitWaiters: Set<() => void>;
   timeoutHandle: NodeJS.Timeout | undefined;
@@ -173,14 +168,34 @@ export interface ProcessReadResult {
 
 export interface ProcessManagerOptions {
   maxRetainedOutputBytes: number;
+  maxTotalRetainedOutputBytes: number;
   processRetentionMs: number;
   maxProcesses: number;
-  defaultMaxOutputBytes: number;
+  maxRunningProcesses: number;
+  defaultReadOutputBytes: number;
+  maxReadOutputBytes: number;
+}
+
+export interface ProcessManagerStats {
+  managedProcesses: number;
+  runningProcesses: number;
+  retainedOutputBytes: number;
+  droppedOutputBytes: number;
+  peakManagedProcesses: number;
+  peakRunningProcesses: number;
+  peakRetainedOutputBytes: number;
 }
 
 export class ProcessManager {
   readonly #processes = new Map<string, ManagedProcess>();
+  readonly #outputRecency = new Map<string, ManagedProcess>();
   readonly #options: ProcessManagerOptions;
+  #runningProcesses = 0;
+  #retainedOutputBytes = 0;
+  #droppedOutputBytes = 0;
+  #peakManagedProcesses = 0;
+  #peakRunningProcesses = 0;
+  #peakRetainedOutputBytes = 0;
 
   constructor(options: ProcessManagerOptions) {
     this.#options = options;
@@ -189,6 +204,7 @@ export class ProcessManager {
   start(request: StartProcessRequest): string {
     this.prune();
     this.#makeCapacity();
+    this.#ensureExecutionCapacity();
 
     const child = spawn(request.executable, request.args, {
       cwd: request.cwd,
@@ -209,12 +225,9 @@ export class ProcessManager {
       signal: undefined,
       error: undefined,
       timedOut: false,
-      chunks: [],
+      outputBuffer: new IndexedProcessOutputBuffer(),
       pendingOutput: { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) },
-      retainedBytes: 0,
       totalOutputBytes: 0,
-      droppedOutputBytes: 0,
-      nextSeq: 1,
       waiters: new Set(),
       exitWaiters: new Set(),
       timeoutHandle: undefined,
@@ -222,6 +235,9 @@ export class ProcessManager {
       cleanup: request.cleanup,
     };
     this.#processes.set(sessionId, managed);
+    this.#runningProcesses += 1;
+    this.#peakManagedProcesses = Math.max(this.#peakManagedProcesses, this.#processes.size);
+    this.#peakRunningProcesses = Math.max(this.#peakRunningProcesses, this.#runningProcesses);
 
     child.stdout.on("data", (data: Buffer | string) => {
       this.#appendOutput(managed, "stdout", Buffer.from(data));
@@ -284,29 +300,25 @@ export class ProcessManager {
     const maxOutputBytes = Math.max(
       OUTPUT_CHUNK_BYTES,
       Math.min(
-        request.maxOutputBytes ?? this.#options.defaultMaxOutputBytes,
-        this.#options.defaultMaxOutputBytes,
+        request.maxOutputBytes ?? this.#options.defaultReadOutputBytes,
+        this.#options.maxReadOutputBytes,
       ),
     );
-    const eligible = managed.chunks.filter((chunk) => chunk.seq > afterSeq);
-    const selected: OutputChunk[] = [];
-    let selectedBytes = 0;
-    for (const chunk of eligible) {
-      if (selectedBytes + chunk.data.length > maxOutputBytes) {
-        break;
+    const selected = managed.outputBuffer.selectAfter(afterSeq, maxOutputBytes);
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const outputChunks: Buffer[] = [];
+    for (const chunk of selected.chunks) {
+      outputChunks.push(chunk.data);
+      if (chunk.stream === "stdout") {
+        stdoutChunks.push(chunk.data);
+      } else {
+        stderrChunks.push(chunk.data);
       }
-      selected.push(chunk);
-      selectedBytes += chunk.data.length;
     }
-
-    const stdout = Buffer.concat(
-      selected.filter((chunk) => chunk.stream === "stdout").map((chunk) => chunk.data),
-    ).toString("utf8");
-    const stderr = Buffer.concat(
-      selected.filter((chunk) => chunk.stream === "stderr").map((chunk) => chunk.data),
-    ).toString("utf8");
-    const output = Buffer.concat(selected.map((chunk) => chunk.data)).toString("utf8");
-    const nextSeq = selected.at(-1)?.seq ?? afterSeq;
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    const output = Buffer.concat(outputChunks).toString("utf8");
     const now = managed.endedAt ?? Date.now();
 
     return {
@@ -328,10 +340,10 @@ export class ProcessManager {
       stdout,
       stderr,
       output,
-      nextSeq,
-      hasMore: eligible.length > selected.length,
+      nextSeq: selected.nextSeq,
+      hasMore: selected.hasMore,
       totalOutputBytes: managed.totalOutputBytes,
-      droppedOutputBytes: managed.droppedOutputBytes,
+      droppedOutputBytes: managed.outputBuffer.droppedBytes,
     };
   }
 
@@ -411,6 +423,18 @@ export class ProcessManager {
     return this.read(sessionId, { waitMs: Math.min(graceMs, 1000) });
   }
 
+  stats(): ProcessManagerStats {
+    return {
+      managedProcesses: this.#processes.size,
+      runningProcesses: this.#runningProcesses,
+      retainedOutputBytes: this.#retainedOutputBytes,
+      droppedOutputBytes: this.#droppedOutputBytes,
+      peakManagedProcesses: this.#peakManagedProcesses,
+      peakRunningProcesses: this.#peakRunningProcesses,
+      peakRetainedOutputBytes: this.#peakRetainedOutputBytes,
+    };
+  }
+
   list(): Array<{
     sessionId: string;
     pid: number | undefined;
@@ -457,6 +481,14 @@ export class ProcessManager {
       if (this.#isRunning(managed)) {
         this.#signal(managed, "SIGKILL");
       }
+    }
+  }
+
+  #ensureExecutionCapacity(): void {
+    if (this.#runningProcesses >= this.#options.maxRunningProcesses) {
+      throw new Error(
+        `Maximum running process count (${this.#options.maxRunningProcesses}) reached`,
+      );
     }
   }
 
@@ -511,23 +543,47 @@ export class ProcessManager {
     stream: ProcessOutputStream,
     chunks: Buffer[],
   ): void {
-    for (const data of chunks) {
-      managed.chunks.push({ seq: managed.nextSeq, stream, data });
-      managed.nextSeq += 1;
-      managed.retainedBytes += data.length;
-    }
+    const before = managed.outputBuffer.retainedBytes;
+    managed.outputBuffer.append(stream, chunks);
+    this.#retainedOutputBytes += managed.outputBuffer.retainedBytes - before;
+    this.#peakRetainedOutputBytes = Math.max(
+      this.#peakRetainedOutputBytes,
+      this.#retainedOutputBytes,
+    );
+    this.#touchOutput(managed);
   }
 
   #trimRetainedOutput(managed: ManagedProcess): void {
-    while (
-      managed.retainedBytes > this.#options.maxRetainedOutputBytes &&
-      managed.chunks.length > 0
-    ) {
-      const removed = managed.chunks.shift();
-      if (removed) {
-        managed.retainedBytes -= removed.data.length;
-        managed.droppedOutputBytes += removed.data.length;
+    const dropped = managed.outputBuffer.trimTo(this.#options.maxRetainedOutputBytes);
+    this.#retainedOutputBytes = Math.max(0, this.#retainedOutputBytes - dropped);
+    this.#droppedOutputBytes += dropped;
+    this.#touchOutput(managed);
+    this.#trimTotalRetainedOutput();
+  }
+
+  #touchOutput(managed: ManagedProcess): void {
+    this.#outputRecency.delete(managed.sessionId);
+    if (managed.outputBuffer.retainedBytes > 0) {
+      this.#outputRecency.set(managed.sessionId, managed);
+    }
+  }
+
+  #trimTotalRetainedOutput(): void {
+    while (this.#retainedOutputBytes > this.#options.maxTotalRetainedOutputBytes) {
+      const oldest = this.#outputRecency.values().next().value as ManagedProcess | undefined;
+      if (!oldest) {
+        break;
       }
+      const excess = this.#retainedOutputBytes - this.#options.maxTotalRetainedOutputBytes;
+      const targetBytes = Math.max(0, oldest.outputBuffer.retainedBytes - excess);
+      const dropped = oldest.outputBuffer.trimTo(targetBytes);
+      if (dropped === 0) {
+        this.#outputRecency.delete(oldest.sessionId);
+        continue;
+      }
+      this.#retainedOutputBytes = Math.max(0, this.#retainedOutputBytes - dropped);
+      this.#droppedOutputBytes += dropped;
+      this.#touchOutput(oldest);
     }
   }
 
@@ -559,6 +615,7 @@ export class ProcessManager {
     }
     this.#flushPendingOutput(managed);
     managed.endedAt = Date.now();
+    this.#runningProcesses = Math.max(0, this.#runningProcesses - 1);
     managed.exitCode = code;
     managed.signal = signal;
     if (managed.timeoutHandle) {
@@ -588,7 +645,7 @@ export class ProcessManager {
       }
       const remainingMs = expiresAt - Date.now();
       if (remainingMs <= 0) {
-        this.#processes.delete(managed.sessionId);
+        this.#forget(managed);
         return;
       }
       managed.retentionHandle = setTimeout(
@@ -610,6 +667,11 @@ export class ProcessManager {
       managed.retentionHandle = undefined;
     }
     if (this.#processes.get(managed.sessionId) === managed) {
+      this.#retainedOutputBytes = Math.max(
+        0,
+        this.#retainedOutputBytes - managed.outputBuffer.retainedBytes,
+      );
+      this.#outputRecency.delete(managed.sessionId);
       this.#processes.delete(managed.sessionId);
     }
   }
@@ -627,7 +689,7 @@ export class ProcessManager {
     afterSeq: number,
     waitMs: number,
   ): Promise<void> {
-    if (managed.nextSeq - 1 > afterSeq || !this.#isRunning(managed)) {
+    if (managed.outputBuffer.latestSeq > afterSeq || !this.#isRunning(managed)) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {
@@ -643,7 +705,7 @@ export class ProcessManager {
       };
       const timer = setTimeout(finish, waitMs);
       managed.waiters.add(finish);
-      if (managed.nextSeq - 1 > afterSeq || !this.#isRunning(managed)) {
+      if (managed.outputBuffer.latestSeq > afterSeq || !this.#isRunning(managed)) {
         finish();
       }
     });

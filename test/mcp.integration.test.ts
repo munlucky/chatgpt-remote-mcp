@@ -128,6 +128,12 @@ describe("remote development MCP server", () => {
         exitCode: 0,
         stdout: "42\n",
       });
+      expect(scriptResult.structuredContent).not.toHaveProperty("output");
+      expect(scriptResult.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "text", text: expect.stringContaining("42\n") }),
+        ]),
+      );
 
       const writeResult = await client.callTool({
         name: "write_file",
@@ -215,6 +221,42 @@ describe("remote development MCP server", () => {
       running: true,
       completed: false,
     });
+
+    const diagnosticsResponse = await fetch(new URL("/diagnostics", endpoint), {
+      headers: { authorization: "Bearer integration-secret" },
+    });
+    expect(diagnosticsResponse.status).toBe(200);
+    const diagnostics = await diagnosticsResponse.json() as Record<string, any>;
+    expect(diagnostics).toMatchObject({
+      status: "ok",
+      transportMode: "stateless-json",
+      activeMcpSessions: 0,
+      managedProcesses: expect.any(Number),
+      runningProcesses: expect.any(Number),
+      retainedOutputBytes: expect.any(Number),
+      droppedOutputBytes: expect.any(Number),
+      peakManagedProcesses: expect.any(Number),
+      peakRunningProcesses: expect.any(Number),
+      peakRetainedOutputBytes: expect.any(Number),
+      peakActiveMcpRequests: expect.any(Number),
+      memory: {
+        rss: expect.any(Number),
+        heapUsed: expect.any(Number),
+      },
+      eventLoop: {
+        utilization: expect.any(Number),
+        delayP95Ms: expect.any(Number),
+      },
+      telemetry: {
+        consoleLog: false,
+        pendingEvents: expect.any(Number),
+        droppedEvents: expect.any(Number),
+        writeFailures: expect.any(Number),
+      },
+    });
+    expect(diagnostics.runningProcesses).toBeGreaterThanOrEqual(1);
+    expect(diagnostics.peakRunningProcesses).toBeGreaterThanOrEqual(1);
+    expect(diagnostics.peakActiveMcpRequests).toBeGreaterThanOrEqual(1);
 
     const readResponse = await post({
       jsonrpc: "2.0",

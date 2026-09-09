@@ -22,14 +22,18 @@ export interface AppConfig {
   defaultShell: string;
   maxRequestBody: string;
   maxOutputBytes: number;
+  defaultProcessOutputBytes: number;
   maxRetainedProcessOutputBytes: number;
+  maxTotalRetainedProcessOutputBytes: number;
   processRetentionMs: number;
   maxProcesses: number;
+  maxRunningProcesses: number;
   maxFileChunkBytes: number;
   maxEditFileBytes: number;
   usageLogDir?: string;
   usageLogMaxBytes?: number;
   usageLogFiles?: number;
+  usageConsoleLog: boolean;
   buildId?: string;
   probeSecret?: string;
 }
@@ -139,12 +143,51 @@ export function loadConfig(
         "MCP_OAUTH_RESOURCE",
       )
     : undefined;
+  const maxOutputBytes = parseInteger(
+    env.MCP_MAX_OUTPUT_BYTES,
+    1024 * 1024,
+    "MCP_MAX_OUTPUT_BYTES",
+    16 * 1024,
+  );
+  const defaultProcessOutputBytes = parseInteger(
+    env.MCP_DEFAULT_OUTPUT_BYTES,
+    128 * 1024,
+    "MCP_DEFAULT_OUTPUT_BYTES",
+    16 * 1024,
+    maxOutputBytes,
+  );
+  const maxRetainedProcessOutputBytes = parseInteger(
+    env.MCP_MAX_RETAINED_PROCESS_OUTPUT_BYTES,
+    4 * 1024 * 1024,
+    "MCP_MAX_RETAINED_PROCESS_OUTPUT_BYTES",
+    64 * 1024,
+  );
+  const maxTotalRetainedProcessOutputBytes = parseInteger(
+    env.MCP_MAX_TOTAL_RETAINED_OUTPUT_BYTES,
+    64 * 1024 * 1024,
+    "MCP_MAX_TOTAL_RETAINED_OUTPUT_BYTES",
+    64 * 1024,
+  );
+  const maxProcesses = parseInteger(
+    env.MCP_MAX_PROCESSES,
+    128,
+    "MCP_MAX_PROCESSES",
+    1,
+  );
+  const maxRunningProcesses = parseInteger(
+    env.MCP_MAX_RUNNING_PROCESSES,
+    Math.min(12, maxProcesses),
+    "MCP_MAX_RUNNING_PROCESSES",
+    1,
+    maxProcesses,
+  );
 
   return {
     probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
     usageLogDir: env.MCP_USAGE_LOG_DIR?.trim() || undefined,
     usageLogMaxBytes: parseInteger(env.MCP_USAGE_LOG_MAX_BYTES, 10 * 1024 * 1024, "MCP_USAGE_LOG_MAX_BYTES", 4096, 100 * 1024 * 1024),
     usageLogFiles: parseInteger(env.MCP_USAGE_LOG_FILES, 7, "MCP_USAGE_LOG_FILES", 1, 100),
+    usageConsoleLog: parseBoolean(env.MCP_USAGE_CONSOLE_LOG, false),
     buildId: /^[a-zA-Z0-9._-]{1,80}$/.test(env.MCP_BUILD_ID || "") ? env.MCP_BUILD_ID : "unknown",
     host: env.MCP_HOST?.trim() || "0.0.0.0",
     port: parseInteger(env.MCP_PORT, 3000, "MCP_PORT", 1, 65_535),
@@ -197,30 +240,18 @@ export function loadConfig(
     defaultShell:
       env.MCP_DEFAULT_SHELL?.trim() || env.SHELL?.trim() || "/bin/bash",
     maxRequestBody: env.MCP_MAX_REQUEST_BODY?.trim() || "8mb",
-    maxOutputBytes: parseInteger(
-      env.MCP_MAX_OUTPUT_BYTES,
-      1024 * 1024,
-      "MCP_MAX_OUTPUT_BYTES",
-      16 * 1024,
-    ),
-    maxRetainedProcessOutputBytes: parseInteger(
-      env.MCP_MAX_RETAINED_PROCESS_OUTPUT_BYTES,
-      4 * 1024 * 1024,
-      "MCP_MAX_RETAINED_PROCESS_OUTPUT_BYTES",
-      64 * 1024,
-    ),
+    maxOutputBytes,
+    defaultProcessOutputBytes,
+    maxRetainedProcessOutputBytes,
+    maxTotalRetainedProcessOutputBytes,
     processRetentionMs: parseInteger(
       env.MCP_PROCESS_RETENTION_MS,
       60 * 60 * 1000,
       "MCP_PROCESS_RETENTION_MS",
       1000,
     ),
-    maxProcesses: parseInteger(
-      env.MCP_MAX_PROCESSES,
-      128,
-      "MCP_MAX_PROCESSES",
-      1,
-    ),
+    maxProcesses,
+    maxRunningProcesses,
     maxFileChunkBytes: parseInteger(
       env.MCP_MAX_FILE_CHUNK_BYTES,
       1024 * 1024,

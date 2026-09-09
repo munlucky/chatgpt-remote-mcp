@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Server as HttpServer } from "node:http";
+import { monitorEventLoopDelay, performance as nodePerformance } from "node:perf_hooks";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -62,6 +63,9 @@ export async function startHttpServer(
     console.warn("OAuth migration warning: configured TTL exceeds the recommended 1h access / 30d refresh policy. Update existing .env overrides; changing TTL does not invalidate issued tokens. See docs/security-migration.md.");
   }
   const usageLog = new UsageLog(config.usageLogDir, config.usageLogMaxBytes, config.usageLogFiles);
+  const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+  eventLoopDelay.enable();
+  const eventLoopStart = nodePerformance.eventLoopUtilization();
   app.disable("x-powered-by");
   if (config.trustProxyHops > 0) {
     app.set("trust proxy", config.trustProxyHops);
@@ -112,7 +116,7 @@ export async function startHttpServer(
           ...metrics,
           responseBytes: outcome === "completed" ? responseBytes : null,
         };
-      console.log(JSON.stringify(event));
+      if (config.usageConsoleLog) console.log(JSON.stringify(event));
       usageLog.record(event);
     };
     response.once("finish", () => logCompletion("completed"));
@@ -127,6 +131,7 @@ export async function startHttpServer(
 
   const activeRequests = new Set<ActiveRequest>();
   let activeMcpRequests = 0;
+  let peakActiveMcpRequests = 0;
   const oauthProvider = config.oauthEnabled ? new RemoteDevOAuthProvider(config) : undefined;
   if (oauthProvider) {
     app.get("/.well-known/oauth-protected-resource", (_request, response) => {
@@ -171,6 +176,9 @@ export async function startHttpServer(
   });
 
   app.get("/diagnostics", authenticate, (_request, response) => {
+    const processStats = services.processManager.stats();
+    const memory = process.memoryUsage();
+    const eventLoopUtilization = nodePerformance.eventLoopUtilization(eventLoopStart);
     response.set("Cache-Control", "no-store");
     response.json({
       status: "ok",
@@ -179,11 +187,31 @@ export async function startHttpServer(
       transportMode: "stateless-json",
       activeMcpSessions: 0,
       activeMcpRequests,
-      managedProcesses: services.processManager.list().length,
+      peakActiveMcpRequests,
+      ...processStats,
+      memory: {
+        rss: memory.rss,
+        heapTotal: memory.heapTotal,
+        heapUsed: memory.heapUsed,
+        external: memory.external,
+        arrayBuffers: memory.arrayBuffers,
+      },
+      eventLoop: {
+        utilization: eventLoopUtilization.utilization,
+        delayP50Ms: eventLoopDelay.percentile(50) / 1e6,
+        delayP95Ms: eventLoopDelay.percentile(95) / 1e6,
+        delayP99Ms: eventLoopDelay.percentile(99) / 1e6,
+      },
       unrestrictedHostAccess: true,
       oauthEnabled: config.oauthEnabled,
       buildId: config.buildId || "unknown",
-      telemetry: { enabled: Boolean(config.usageLogDir), droppedEvents: usageLog.droppedEvents, writeFailures: usageLog.writeFailures },
+      telemetry: {
+        enabled: Boolean(config.usageLogDir),
+        consoleLog: config.usageConsoleLog,
+        pendingEvents: usageLog.pendingEvents,
+        droppedEvents: usageLog.droppedEvents,
+        writeFailures: usageLog.writeFailures,
+      },
     });
   });
 
@@ -200,6 +228,7 @@ export async function startHttpServer(
     const activeRequest = { server };
     activeRequests.add(activeRequest);
     activeMcpRequests += 1;
+    peakActiveMcpRequests = Math.max(peakActiveMcpRequests, activeMcpRequests);
     let closed = false;
     const closeRequest = async (): Promise<void> => {
       if (closed) {
@@ -272,6 +301,7 @@ export async function startHttpServer(
 
   const close = async (): Promise<void> => {
     clearInterval(cleanupInterval);
+    eventLoopDelay.disable();
     const requests = [...activeRequests];
     activeRequests.clear();
     activeMcpRequests = 0;

@@ -28,6 +28,47 @@ describe("loadConfig", () => {
     });
   });
 
+  it("loads bounded single-node process runtime defaults", () => {
+    expect(loadConfig({ MCP_AUTH_TOKEN: "secret" }, "/tmp")).toMatchObject({
+      defaultProcessOutputBytes: 128 * 1024,
+      maxOutputBytes: 1024 * 1024,
+      maxRetainedProcessOutputBytes: 4 * 1024 * 1024,
+      maxTotalRetainedProcessOutputBytes: 64 * 1024 * 1024,
+      maxProcesses: 128,
+      maxRunningProcesses: 12,
+      usageConsoleLog: false,
+    });
+  });
+
+  it("supports runtime budget overrides and validates dependent limits", () => {
+    expect(loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_MAX_OUTPUT_BYTES: "262144",
+      MCP_DEFAULT_OUTPUT_BYTES: "65536",
+      MCP_MAX_RETAINED_PROCESS_OUTPUT_BYTES: "524288",
+      MCP_MAX_TOTAL_RETAINED_OUTPUT_BYTES: "1048576",
+      MCP_MAX_PROCESSES: "4",
+      MCP_MAX_RUNNING_PROCESSES: "2",
+    }, "/tmp")).toMatchObject({
+      maxOutputBytes: 262144,
+      defaultProcessOutputBytes: 65536,
+      maxRetainedProcessOutputBytes: 524288,
+      maxTotalRetainedProcessOutputBytes: 1048576,
+      maxProcesses: 4,
+      maxRunningProcesses: 2,
+    });
+
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_MAX_OUTPUT_BYTES: "65536",
+      MCP_DEFAULT_OUTPUT_BYTES: "131072",
+    }, "/tmp")).toThrow("MCP_DEFAULT_OUTPUT_BYTES must be an integer between 16384 and 65536");
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_MAX_PROCESSES: "2",
+      MCP_MAX_RUNNING_PROCESSES: "3",
+    }, "/tmp")).toThrow("MCP_MAX_RUNNING_PROCESSES must be an integer between 1 and 2");
+  });
   it("rejects partial integers and ports outside the valid range", () => {
     for (const value of ["3000oops", "3000.9", "70000"]) {
       expect(() =>
