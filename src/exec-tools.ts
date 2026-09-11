@@ -4,7 +4,7 @@ import * as z from "zod/v4";
 import type { AppConfig } from "./config.js";
 import { FileService } from "./file-service.js";
 import { ProcessManager } from "./process-manager.js";
-import { runScript } from "./script-runner.js";
+import { DEFAULT_PROCESS_YIELD_MS, runScript } from "./script-runner.js";
 import { runTool, type SuccessResultFormatter } from "./tool-result.js";
 import {
   createCachedToolRegistrar,
@@ -13,10 +13,14 @@ import {
   type CachedToolRegistrar,
 } from "./tool-metadata.js";
 
+const DEFAULT_PROCESS_POLL_AFTER_MS = 1000;
+
 function processResult(result: Awaited<ReturnType<ProcessManager["read"]>>): Record<string, unknown> {
   return {
     ...result,
+    status: result.running ? "accepted" : "completed",
     completed: !result.running,
+    ...(result.running ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
   };
 }
 
@@ -25,8 +29,10 @@ const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
     const output = typeof data.output === "string" ? data.output : "";
     const summary = JSON.stringify({
       sessionId: data.sessionId,
+      status: data.status,
       running: data.running,
       completed: data.completed,
+      pollAfterMs: data.pollAfterMs,
       exitCode: data.exitCode,
       signal: data.signal,
       timedOut: data.timedOut,
@@ -95,7 +101,7 @@ export function registerExecTools(
     {
       title: "Execute command",
       description:
-        "Run an unrestricted shell command on the host. The command inherits the MCP server's full OS permissions, environment, filesystem, and network access. A successful start always returns a process session ID, current process state, and retained output; poll a running process with read_process or write_stdin.",
+        "Run an unrestricted shell command on the host. The command inherits the MCP server's full OS permissions, environment, filesystem, and network access. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process or write_stdin.",
       inputSchema: {
         cmd: z.string().min(1).describe("Shell command or script to execute."),
         workdir: z
@@ -118,9 +124,9 @@ export function registerExecTools(
           .int()
           .min(0)
           .max(30_000)
-          .default(10_000)
+          .default(DEFAULT_PROCESS_YIELD_MS)
           .describe(
-            "How long to wait for the process to exit before returning its current state. Zero returns immediately.",
+            "How long to wait for the process to exit before returning state. Defaults to 750 ms; if still running, the call returns status=accepted with sessionId and pollAfterMs for read_process. Zero returns immediately.",
           ),
         maxOutputBytes: maxOutputBytesSchema,
       },
@@ -163,7 +169,7 @@ export function registerExecTools(
     {
       title: "Run script",
       description:
-        "Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution is unrestricted and has the MCP server's full host permissions. A successful start always returns a process session ID, current process state, and retained output.",
+        "Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution is unrestricted and has the MCP server's full host permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process.",
       inputSchema: {
         runtime: z
           .enum(["bash", "sh", "node", "python", "custom"])
@@ -191,9 +197,9 @@ export function registerExecTools(
           .int()
           .min(0)
           .max(30_000)
-          .default(10_000)
+          .default(DEFAULT_PROCESS_YIELD_MS)
           .describe(
-            "How long to wait for the script process to exit before returning its current state. Zero returns immediately.",
+            "How long to wait for the script process to exit before returning state. Defaults to 750 ms; if still running, the call returns status=accepted with sessionId and pollAfterMs for read_process. Zero returns immediately.",
           ),
         maxOutputBytes: maxOutputBytesSchema,
         keepScript: z

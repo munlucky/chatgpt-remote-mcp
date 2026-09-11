@@ -7,6 +7,8 @@ import { ProcessManager } from "./process-manager.js";
 
 export type ScriptRuntime = "bash" | "sh" | "node" | "python" | "custom";
 
+export const DEFAULT_PROCESS_YIELD_MS = 750;
+
 export interface RunScriptRequest {
   runtime: ScriptRuntime;
   script: string;
@@ -96,7 +98,10 @@ export async function runScript(
     throw error;
   }
 
-  await processManager.waitForExit(sessionId, request.yieldTimeMs ?? 10_000);
+  await processManager.waitForExit(
+    sessionId,
+    request.yieldTimeMs ?? DEFAULT_PROCESS_YIELD_MS,
+  );
   const result = await processManager.read(sessionId, {
     maxOutputBytes: request.maxOutputBytes,
   });

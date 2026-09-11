@@ -112,13 +112,16 @@ describe("client-facing metadata accuracy", () => {
     for (const tool of [execCommand, runScript]) {
       const properties = tool.inputSchema.properties as Record<
         string,
-        { description?: string }
+        { description?: string; default?: unknown }
       >;
       expect(properties.timeoutMs?.description).toContain("sending SIGTERM");
       expect(properties.timeoutMs?.description).toContain("sent SIGKILL");
       expect(properties.timeoutMs?.description).not.toContain("Maximum runtime");
       expect(properties.yieldTimeMs?.description).toContain("wait for");
       expect(properties.yieldTimeMs?.description).toContain("to exit");
+      expect(properties.yieldTimeMs?.description).toContain("status=accepted");
+      expect(properties.yieldTimeMs?.description).toContain("read_process");
+      expect(properties.yieldTimeMs?.default).toBe(750);
     }
   });
 });

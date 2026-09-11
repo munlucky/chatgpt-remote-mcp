@@ -118,16 +118,18 @@ describe("remote development MCP server", () => {
         name: "run_script",
         arguments: {
           runtime: "node",
-          script: "console.log(6 * 7)",
+          script: "await new Promise(resolve => setTimeout(resolve, 900)); console.log(6 * 7)",
           yieldTimeMs: 2000,
         },
       });
       expect(scriptResult.isError).not.toBe(true);
       expect(scriptResult.structuredContent).toMatchObject({
+        status: "completed",
         completed: true,
         exitCode: 0,
         stdout: "42\n",
       });
+      expect(scriptResult.structuredContent).not.toHaveProperty("pollAfterMs");
       expect(scriptResult.structuredContent).not.toHaveProperty("output");
       expect(scriptResult.content).toEqual(
         expect.arrayContaining([
@@ -152,6 +154,82 @@ describe("remote development MCP server", () => {
     } finally {
       await transport.terminateSession();
       await client.close();
+    }
+  });
+
+  it("fast-accepts long-running process tools by default", async () => {
+    let requestId = 100;
+    const call = async (name: string, arguments_: Record<string, unknown>) => {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer integration-secret",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId++,
+          method: "tools/call",
+          params: { name, arguments: arguments_ },
+        }),
+      });
+      return { response, body: (await response.json()) as JsonRpcResponse };
+    };
+
+    const sessionIds: string[] = [];
+    try {
+      const execStartedAt = performance.now();
+      const execCall = await call("exec_command", {
+        cmd: "node -e \"setTimeout(() => console.log('exec-finished'), 4000)\"",
+      });
+      const execElapsedMs = performance.now() - execStartedAt;
+      expect(execCall.response.status).toBe(200);
+      expect(execElapsedMs).toBeLessThan(2000);
+      expect(execCall.body.result?.structuredContent).toMatchObject({
+        status: "accepted",
+        running: true,
+        completed: false,
+        pollAfterMs: 1000,
+        sessionId: expect.any(String),
+      });
+      sessionIds.push(String(execCall.body.result?.structuredContent?.sessionId));
+
+      const scriptStartedAt = performance.now();
+      const scriptCall = await call("run_script", {
+        runtime: "node",
+        script: "await new Promise(resolve => setTimeout(resolve, 4000)); console.log('script-finished');",
+      });
+      const scriptElapsedMs = performance.now() - scriptStartedAt;
+      expect(scriptCall.response.status).toBe(200);
+      expect(scriptElapsedMs).toBeLessThan(2000);
+      expect(scriptCall.body.result?.structuredContent).toMatchObject({
+        status: "accepted",
+        running: true,
+        completed: false,
+        pollAfterMs: 1000,
+        sessionId: expect.any(String),
+      });
+      sessionIds.push(String(scriptCall.body.result?.structuredContent?.sessionId));
+
+      const explicitYieldCall = await call("exec_command", {
+        cmd: "node -e \"setTimeout(() => console.log('explicit-yield-finished'), 900)\"",
+        yieldTimeMs: 2000,
+      });
+      expect(explicitYieldCall.response.status).toBe(200);
+      expect(explicitYieldCall.body.result?.structuredContent).toMatchObject({
+        status: "completed",
+        running: false,
+        completed: true,
+        exitCode: 0,
+        stdout: expect.stringContaining("explicit-yield-finished"),
+      });
+      expect(explicitYieldCall.body.result?.structuredContent).not.toHaveProperty("pollAfterMs");
+    } finally {
+      for (const sessionId of sessionIds) {
+        await services.processManager.terminate(sessionId, "SIGTERM", 250).catch(() => undefined);
+        await services.processManager.waitForExit(sessionId, 2000).catch(() => undefined);
+      }
     }
   });
 
