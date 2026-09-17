@@ -10,9 +10,13 @@ npm lockfile; GitHub CI/CD is not required for the intended deployment model.
 1. Copy `.env.example` to `.env` or run `scripts/setup-keys.ps1`.
 2. Run `scripts/setup-keys.ps1` to generate independent OAuth approval and probe secrets when they are empty or missing.
 3. Replace placeholder host paths, public domain and Cloudflare tunnel token in `.env`.
-4. Configure the tunnel origin to `http://localhost:2999`.
-5. Run `scripts/start.ps1` from PowerShell.
-6. Connect your MCP client to the configured public URL followed by `/mcp`.
+4. Configure the tunnel origin to `http://localhost:2999` in your Cloudflare Zero Trust dashboard.
+5. (Optional) Run `scripts/verify-env.ps1` to validate Docker status, paths, and environment settings.
+6. Run `scripts/start.ps1` from PowerShell.
+7. Run `scripts/get-approval-key.ps1` to view/copy the OAuth approval key.
+8. Connect your MCP client to the configured public URL followed by `/mcp`.
+
+> **Installing on another PC?** See the step-by-step [Multi-machine Setup Guide](docs/multi-machine-setup.md) for instructions on creating new Cloudflare tunnels and managing multiple machines.
 
 `.env.example` contains examples only. Actual paths, mount aliases, container names,
 volume names, timezone and credentials belong in ignored `.env`. Preserve existing
