@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { errorMessage } from "./errors.js";
+import { errorMessage, McpToolError } from "./errors.js";
 import { requestMetrics } from "./telemetry.js";
 
 export interface SuccessResultFormatter {
@@ -24,7 +24,11 @@ export function successResult(
 }
 
 export function errorResult(error: unknown): CallToolResult {
-  const data = { error: errorMessage(error) };
+  const data: Record<string, unknown> = { error: errorMessage(error) };
+  if (error instanceof McpToolError) {
+    data.code = error.code;
+    if (error.details) data.details = error.details;
+  }
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     structuredContent: data,

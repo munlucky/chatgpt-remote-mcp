@@ -14,10 +14,13 @@ import { createServices } from "../src/mcp-server.js";
 
 const ALL_TOOLS = [
   "apply_patch",
+  "checkpoint_work",
   "chmod_path",
+  "complete_work",
   "copy_path",
   "download_file",
   "exec_command",
+  "get_work_context",
   "hash_file",
   "list_directory",
   "list_processes",
@@ -41,10 +44,13 @@ type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
 const EXPECTED_ANNOTATIONS = {
   apply_patch: [false, true, false, false],
+  checkpoint_work: [false, true, true, false],
   chmod_path: [false, true, true, false],
+  complete_work: [false, true, true, false],
   copy_path: [false, true, true, false],
   download_file: [true, false, true, false],
   exec_command: [false, true, false, true],
+  get_work_context: [true, false, true, false],
   hash_file: [true, false, true, false],
   list_directory: [true, false, true, false],
   list_processes: [true, false, true, false],
@@ -843,6 +849,49 @@ describe.sequential("all registered MCP tools", () => {
     const result = await callOk("read_files", { paths: ["missing-batch-a", "missing-batch-b"], cwd: testRoot });
     expect(result.count).toBe(2);
     expect((result.files as Record<string, unknown>[]).every(file => typeof file.error === "string")).toBe(true);
+  });
+
+  it("creates, reads, and closes a durable continuity task", async () => {
+    const created = await callOk("checkpoint_work", {
+      mode: "create",
+      cwd: testRoot,
+      requestId: randomUUID(),
+      objective: "exercise continuity tools",
+      checkpoint: {
+        phase: "implementation",
+        completed: [],
+        current: "exercise MCP continuity surface",
+        remaining: ["close task"],
+        changedPaths: [],
+        evidenceRefs: [],
+        blockers: [],
+      },
+    });
+    expect(created).toMatchObject({
+      taskId: expect.any(String),
+      revision: 1,
+      status: "active",
+    });
+
+    const context = await callOk("get_work_context", { taskId: created.taskId });
+    expect(context).toMatchObject({
+      selection: "selected",
+      task: { taskId: created.taskId, revision: 1, status: "active" },
+    });
+
+    const completed = await callOk("complete_work", {
+      taskId: created.taskId,
+      requestId: randomUUID(),
+      expectedRevision: 1,
+      outcome: "abandoned",
+      summary: "all-tools integration surface exercised",
+      evidenceRefs: [],
+    });
+    expect(completed).toMatchObject({
+      taskId: created.taskId,
+      revision: 2,
+      status: "abandoned",
+    });
   });
 
   it("exercises every published tool through MCP", () => {

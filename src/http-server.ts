@@ -58,6 +58,7 @@ export async function startHttpServer(
   config: AppConfig,
   services: McpServices,
 ): Promise<RunningHttpServer> {
+  await services.continuityService.initialize();
   const app = express();
   if (config.oauthEnabled && (config.oauthAccessTokenTtlSeconds > 3600 || config.oauthRefreshTokenTtlSeconds > 2592000)) {
     console.warn("OAuth migration warning: configured TTL exceeds the recommended 1h access / 30d refresh policy. Update existing .env overrides; changing TTL does not invalidate issued tokens. See docs/security-migration.md.");
@@ -175,8 +176,9 @@ export async function startHttpServer(
     response.json({ status: "ok" });
   });
 
-  app.get("/diagnostics", authenticate, (_request, response) => {
+  app.get("/diagnostics", authenticate, async (_request, response) => {
     const processStats = services.processManager.stats();
+    const continuity = await services.continuityService.health();
     const memory = process.memoryUsage();
     const eventLoopUtilization = nodePerformance.eventLoopUtilization(eventLoopStart);
     response.set("Cache-Control", "no-store");
@@ -201,6 +203,15 @@ export async function startHttpServer(
         delayP50Ms: eventLoopDelay.percentile(50) / 1e6,
         delayP95Ms: eventLoopDelay.percentile(95) / 1e6,
         delayP99Ms: eventLoopDelay.percentile(99) / 1e6,
+      },
+      continuity: {
+        schemaVersion: continuity.schemaVersion,
+        initialized: continuity.initialized,
+        writerGuardHeld: continuity.writerGuardHeld,
+        pendingWrites: continuity.pendingWrites,
+        failedWrites: continuity.failedWrites,
+        unknownExecutions: continuity.unknownExecutions,
+        bytesUsed: continuity.bytesUsed,
       },
       unrestrictedHostAccess: true,
       oauthEnabled: config.oauthEnabled,
@@ -307,6 +318,7 @@ export async function startHttpServer(
     activeMcpRequests = 0;
     await Promise.allSettled(requests.map((request) => request.server.close()));
     await services.processManager.shutdown();
+    await services.continuityService.close();
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => {
         if (error) {

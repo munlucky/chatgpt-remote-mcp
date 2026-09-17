@@ -24,6 +24,9 @@ interface ManagedProcess {
   signal: NodeJS.Signals | null | undefined;
   error: string | undefined;
   timedOut: boolean;
+  spawnFailed: boolean;
+  onTerminal: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
+  terminalPromise: Promise<void> | undefined;
   outputBuffer: IndexedProcessOutputBuffer;
   pendingOutput: Record<ProcessOutputStream, Buffer>;
   totalOutputBytes: number;
@@ -127,6 +130,16 @@ function splitOutputChunks(
   };
 }
 
+export interface ProcessTerminalEvent {
+  sessionId: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  spawnFailed: boolean;
+  totalOutputBytes: number;
+  errorCode: string | null;
+}
+
 export interface StartProcessRequest {
   executable: string;
   args: string[];
@@ -136,6 +149,8 @@ export interface StartProcessRequest {
   timeoutMs?: number | undefined;
   stdin?: string | undefined;
   cleanup?: (() => Promise<void>) | undefined;
+  sessionId?: string | undefined;
+  onTerminal?: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
 }
 
 export interface ReadProcessRequest {
@@ -196,6 +211,7 @@ export class ProcessManager {
   #peakManagedProcesses = 0;
   #peakRunningProcesses = 0;
   #peakRetainedOutputBytes = 0;
+  readonly #pendingLifecycle = new Set<Promise<void>>();
 
   constructor(options: ProcessManagerOptions) {
     this.#options = options;
@@ -206,6 +222,7 @@ export class ProcessManager {
     this.#makeCapacity();
     this.#ensureExecutionCapacity();
 
+    const sessionId = request.sessionId ?? randomUUID();
     const child = spawn(request.executable, request.args, {
       cwd: request.cwd,
       env: { ...process.env, ...request.env },
@@ -213,7 +230,6 @@ export class ProcessManager {
       detached: process.platform !== "win32",
       windowsHide: true,
     });
-    const sessionId = randomUUID();
     const managed: ManagedProcess = {
       sessionId,
       child,
@@ -225,6 +241,9 @@ export class ProcessManager {
       signal: undefined,
       error: undefined,
       timedOut: false,
+      spawnFailed: false,
+      onTerminal: request.onTerminal,
+      terminalPromise: undefined,
       outputBuffer: new IndexedProcessOutputBuffer(),
       pendingOutput: { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) },
       totalOutputBytes: 0,
@@ -249,6 +268,7 @@ export class ProcessManager {
       this.#recordStdinError(managed, error);
     });
     child.on("error", (error) => {
+      managed.spawnFailed = true;
       managed.error = errorMessage(error);
       this.#finish(managed, null, null);
     });
@@ -403,6 +423,13 @@ export class ProcessManager {
     });
   }
 
+  async waitForTerminalHooks(sessionId: string): Promise<void> {
+    const managed = this.#require(sessionId);
+    if (managed.terminalPromise) {
+      await managed.terminalPromise;
+    }
+  }
+
   async terminate(
     sessionId: string,
     signal: NodeJS.Signals = "SIGTERM",
@@ -476,12 +503,14 @@ export class ProcessManager {
     for (const managed of running) {
       this.#signal(managed, "SIGTERM");
     }
-    await new Promise((resolve) => setTimeout(resolve, running.length > 0 ? 500 : 0));
+    await Promise.allSettled(running.map((managed) => this.waitForExit(managed.sessionId, 5000)));
     for (const managed of running) {
       if (this.#isRunning(managed)) {
         this.#signal(managed, "SIGKILL");
       }
     }
+    await Promise.allSettled(running.map((managed) => this.waitForExit(managed.sessionId, 2000)));
+    await Promise.allSettled([...this.#pendingLifecycle]);
   }
 
   #ensureExecutionCapacity(): void {
@@ -623,6 +652,7 @@ export class ProcessManager {
       managed.timeoutHandle = undefined;
     }
     this.#notify(managed);
+    this.#emitTerminal(managed);
     const exitWaiters = [...managed.exitWaiters];
     managed.exitWaiters.clear();
     for (const waiter of exitWaiters) {
@@ -634,6 +664,31 @@ export class ProcessManager {
       });
     }
     this.#scheduleRetention(managed);
+  }
+
+  #emitTerminal(managed: ManagedProcess): void {
+    if (!managed.onTerminal) return;
+    const pending = Promise.resolve(
+      managed.onTerminal({
+        sessionId: managed.sessionId,
+        exitCode: managed.exitCode ?? null,
+        signal: managed.signal ?? null,
+        timedOut: managed.timedOut,
+        spawnFailed: managed.spawnFailed,
+        totalOutputBytes: managed.totalOutputBytes,
+        errorCode: managed.spawnFailed
+          ? "spawn_failed"
+          : managed.timedOut
+            ? "timed_out"
+            : managed.error
+              ? "process_error"
+              : null,
+      }),
+    )
+      .catch(() => undefined)
+      .finally(() => this.#pendingLifecycle.delete(pending));
+    managed.terminalPromise = pending;
+    this.#pendingLifecycle.add(pending);
   }
 
   #scheduleRetention(managed: ManagedProcess): void {

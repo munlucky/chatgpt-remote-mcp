@@ -2,6 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
 import type { AppConfig } from "./config.js";
+import { McpToolError } from "./errors.js";
+import type { ExecutionRecorder } from "./continuity/execution-recorder.js";
+import type { ExecutionRecord } from "./continuity/task-types.js";
 import { FileService } from "./file-service.js";
 import { ProcessManager } from "./process-manager.js";
 import { DEFAULT_PROCESS_YIELD_MS, runScript } from "./script-runner.js";
@@ -15,13 +18,71 @@ import {
 
 const DEFAULT_PROCESS_POLL_AFTER_MS = 1000;
 
-function processResult(result: Awaited<ReturnType<ProcessManager["read"]>>): Record<string, unknown> {
+function processResult(
+  result: Awaited<ReturnType<ProcessManager["read"]>>,
+  tracking?: { taskId: string; operationId: string; executionState?: string } | undefined,
+): Record<string, unknown> {
   return {
     ...result,
     status: result.running ? "accepted" : "completed",
     completed: !result.running,
     ...(result.running ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
+    ...(tracking
+      ? {
+          taskId: tracking.taskId,
+          operationId: tracking.operationId,
+          executionState: tracking.executionState ?? (result.running ? "running" : "exited"),
+        }
+      : {}),
   };
+}
+
+function receiptReplayResult(record: ExecutionRecord): Record<string, unknown> {
+  const completed = record.state === "exited" || record.state === "spawn_failed";
+  return {
+    taskId: record.taskId,
+    operationId: record.operationId,
+    sessionId: record.sessionId,
+    executionState: record.state,
+    status: completed ? "completed" : record.state === "running" ? "accepted" : "unknown",
+    running: record.state === "running",
+    completed,
+    duplicate: true,
+    exitCode: record.exitCode,
+    signal: record.signal,
+    timedOut: record.timedOut,
+    errorCode: record.errorCode,
+    persistenceState: record.persistenceState,
+    ...(record.state === "running" ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
+  };
+}
+
+function requireTrackingPair(taskId: string | undefined, operationId: string | undefined): void {
+  if (Boolean(taskId) !== Boolean(operationId)) {
+    throw new McpToolError(
+      "idempotency_conflict",
+      "taskId and operationId must be provided together for tracked execution",
+    );
+  }
+}
+
+async function trackedProcessResult(
+  processManager: ProcessManager,
+  executionRecorder: ExecutionRecorder,
+  result: Awaited<ReturnType<ProcessManager["read"]>>,
+  taskId: string,
+  operationId: string,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  if (!result.running) {
+    await processManager.waitForTerminalHooks(result.sessionId);
+  }
+  const receipt = await executionRecorder.store.readExecution(workspaceId, operationId);
+  return processResult(result, {
+    taskId,
+    operationId,
+    executionState: receipt?.state ?? (result.running ? "running" : "unknown"),
+  });
 }
 
 const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
@@ -61,6 +122,7 @@ export function registerExecTools(
   config: AppConfig,
   processManager: ProcessManager,
   fileService: FileService,
+  executionRecorder: ExecutionRecorder,
   onlyTool?: string,
 ): void {
   const authMetadata = toolAuthMetadata(config);
@@ -72,6 +134,16 @@ export function registerExecTools(
     .string()
     .uuid()
     .describe("Process session ID returned by exec_command or run_script.");
+  const taskIdSchema = z
+    .string()
+    .uuid()
+    .optional()
+    .describe("Continuity task ID. Provide together with operationId to durably track this execution; omit both for legacy untracked execution.");
+  const operationIdSchema = z
+    .string()
+    .uuid()
+    .optional()
+    .describe("Caller-generated logical execution ID. Reuse it only when retrying the exact same tracked execution; provide together with taskId.");
   const afterSeqSchema = z
     .number()
     .int()
@@ -103,6 +175,8 @@ export function registerExecTools(
       description:
         "Run an unrestricted shell command on the host. The command inherits the MCP server's full OS permissions, environment, filesystem, and network access. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process or write_stdin.",
       inputSchema: {
+        taskId: taskIdSchema,
+        operationId: operationIdSchema,
         cmd: z.string().min(1).describe("Shell command or script to execute."),
         workdir: z
           .string()
@@ -134,6 +208,8 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async ({
+      taskId,
+      operationId,
       cmd,
       workdir,
       shell,
@@ -147,20 +223,86 @@ export function registerExecTools(
       runProcessTool(async () => {
         const cwd = fileService.resolve(".", workdir);
         const executable = shell || config.defaultShell;
-        const sessionId = processManager.start({
-          executable,
-          args: [login ? "-lc" : "-c", cmd],
-          commandForDisplay: cmd,
-          cwd,
-          env,
-          timeoutMs,
-          stdin,
-        });
+        requireTrackingPair(taskId, operationId);
+        const tracking = taskId && operationId
+          ? await executionRecorder.prepare({
+              taskId,
+              operationId,
+              cwd,
+              toolKind: "exec_command",
+              semanticInput: { cmd, cwd, executable, login, env, stdin, timeoutMs },
+            })
+          : undefined;
+        if (tracking && !tracking.shouldSpawn) {
+          if (
+            tracking.record.state === "running" &&
+            tracking.record.sessionId &&
+            tracking.record.bootId === executionRecorder.store.bootId
+          ) {
+            try {
+              return trackedProcessResult(
+                processManager,
+                executionRecorder,
+                await processManager.read(tracking.record.sessionId, { maxOutputBytes }),
+                taskId!,
+                operationId!,
+                tracking.record.workspaceId,
+              );
+            } catch {
+              // Durable receipt remains authoritative if the in-memory session was evicted.
+            }
+          }
+          return receiptReplayResult(tracking.record);
+        }
+
+        let sessionId: string;
+        try {
+          sessionId = processManager.start({
+            executable,
+            args: [login ? "-lc" : "-c", cmd],
+            commandForDisplay: cmd,
+            cwd,
+            env,
+            timeoutMs,
+            stdin,
+            ...(tracking
+              ? {
+                  onTerminal: async (event) => {
+                    await executionRecorder.markTerminal(tracking.record.workspaceId, operationId!, event);
+                  },
+                }
+              : {}),
+          });
+        } catch (error) {
+          if (tracking) await executionRecorder.markSpawnFailed(tracking.record);
+          throw error;
+        }
+        if (tracking) {
+          try {
+            await executionRecorder.markRunning(tracking.record, sessionId);
+          } catch {
+            await executionRecorder.markPersistenceDegraded(tracking.record.workspaceId, operationId!);
+            throw new McpToolError(
+              "persistence_unavailable",
+              "Tracked command was spawned but its running receipt could not be persisted; do not retry with a new operationId",
+              { taskId, operationId, sessionId },
+            );
+          }
+        }
         await processManager.waitForExit(sessionId, yieldTimeMs);
         const result = await processManager.read(sessionId, {
           maxOutputBytes,
         });
-        return processResult(result);
+        return tracking
+          ? trackedProcessResult(
+              processManager,
+              executionRecorder,
+              result,
+              taskId!,
+              operationId!,
+              tracking.record.workspaceId,
+            )
+          : processResult(result);
       }),
   );
 
@@ -171,6 +313,8 @@ export function registerExecTools(
       description:
         "Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution is unrestricted and has the MCP server's full host permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process.",
       inputSchema: {
+        taskId: taskIdSchema,
+        operationId: operationIdSchema,
         runtime: z
           .enum(["bash", "sh", "node", "python", "custom"])
           .default("bash")
@@ -213,6 +357,8 @@ export function registerExecTools(
       _meta: authMetadata,
     },
     async ({
+      taskId,
+      operationId,
       runtime,
       script,
       workdir,
@@ -227,21 +373,102 @@ export function registerExecTools(
       keepScript,
     }) =>
       runProcessTool(async () => {
-        const result = await runScript(processManager, {
-          runtime,
-          script,
-          cwd: fileService.resolve(".", workdir),
-          args,
-          env,
-          interpreter,
-          interpreterArgs,
-          stdin,
-          timeoutMs,
-          yieldTimeMs,
-          maxOutputBytes,
-          keepScript,
-        });
-        return processResult(result);
+        const cwd = fileService.resolve(".", workdir);
+        requireTrackingPair(taskId, operationId);
+        const tracking = taskId && operationId
+          ? await executionRecorder.prepare({
+              taskId,
+              operationId,
+              cwd,
+              toolKind: "run_script",
+              semanticInput: {
+                runtime,
+                script,
+                cwd,
+                args,
+                env,
+                interpreter,
+                interpreterArgs,
+                stdin,
+                timeoutMs,
+                keepScript,
+              },
+            })
+          : undefined;
+        if (tracking && !tracking.shouldSpawn) {
+          if (
+            tracking.record.state === "running" &&
+            tracking.record.sessionId &&
+            tracking.record.bootId === executionRecorder.store.bootId
+          ) {
+            try {
+              return trackedProcessResult(
+                processManager,
+                executionRecorder,
+                await processManager.read(tracking.record.sessionId, { maxOutputBytes }),
+                taskId!,
+                operationId!,
+                tracking.record.workspaceId,
+              );
+            } catch {
+              // Durable receipt remains authoritative if the in-memory session was evicted.
+            }
+          }
+          return receiptReplayResult(tracking.record);
+        }
+
+        let spawnedSessionId: string | undefined;
+        try {
+          const result = await runScript(processManager, {
+            runtime,
+            script,
+            cwd,
+            args,
+            env,
+            interpreter,
+            interpreterArgs,
+            stdin,
+            timeoutMs,
+            yieldTimeMs,
+            maxOutputBytes,
+            keepScript,
+            ...(tracking
+              ? {
+                  onStarted: async (sessionId) => {
+                    spawnedSessionId = sessionId;
+                    try {
+                      await executionRecorder.markRunning(tracking.record, sessionId);
+                    } catch {
+                      await executionRecorder.markPersistenceDegraded(tracking.record.workspaceId, operationId!);
+                      throw new McpToolError(
+                        "persistence_unavailable",
+                        "Tracked script was spawned but its running receipt could not be persisted; do not retry with a new operationId",
+                        { taskId, operationId, sessionId },
+                      );
+                    }
+                  },
+                  onTerminal: async (event) => {
+                    await executionRecorder.markTerminal(tracking.record.workspaceId, operationId!, event);
+                  },
+                }
+              : {}),
+          });
+          return tracking
+            ? trackedProcessResult(
+                processManager,
+                executionRecorder,
+                result,
+                taskId!,
+                operationId!,
+                tracking.record.workspaceId,
+              )
+            : processResult(result);
+        } catch (error) {
+          if (tracking && !spawnedSessionId) {
+            await executionRecorder.markSpawnFailed(tracking.record);
+          }
+          throw error;
+        }
       }),
   );
 
@@ -374,8 +601,9 @@ export function createExecToolRegistrar(
   config: AppConfig,
   processManager: ProcessManager,
   fileService: FileService,
+  executionRecorder: ExecutionRecorder,
 ): CachedToolRegistrar {
   return createCachedToolRegistrar((collector) =>
-    registerExecTools(collector, config, processManager, fileService),
+    registerExecTools(collector, config, processManager, fileService, executionRecorder),
   );
 }

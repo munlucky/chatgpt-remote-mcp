@@ -11,6 +11,7 @@ oauth-approval-key
 # Persistent state & volumes
 /state
 /data
+.chatgpt-remote-mcp-continuity/
 *.sqlite
 *.db
 

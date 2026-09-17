@@ -37,6 +37,13 @@ describe("loadConfig", () => {
       maxProcesses: 128,
       maxRunningProcesses: 12,
       usageConsoleLog: false,
+      continuityMaxSnapshotBytes: 8 * 1024 * 1024,
+      continuityMaxTotalBytes: 256 * 1024 * 1024,
+      continuityCheckpointMaxBytes: 32 * 1024,
+      continuityContextMaxBytes: 64 * 1024,
+      continuitySnapshotMaxFiles: 200,
+      continuitySnapshotMaxBytes: 16 * 1024 * 1024,
+      continuitySnapshotMaxDurationMs: 2000,
     });
   });
 
@@ -78,6 +85,35 @@ describe("loadConfig", () => {
     expect(
       loadConfig({ MCP_AUTH_TOKEN: "secret", MCP_PORT: " 4321 " }, "/tmp").port,
     ).toBe(4321);
+  });
+
+  it("loads continuity state and explicit workspace alias settings", () => {
+    const config = loadConfig(
+      {
+        MCP_AUTH_TOKEN: "secret",
+        MCP_CONTINUITY_STATE_DIR: "/var/lib/mcp/continuity",
+        MCP_WORKSPACE_ALIASES: "/workspace=/shared,/work=/shared",
+        MCP_CONTINUITY_SNAPSHOT_MAX_FILES: "300",
+        MCP_CONTINUITY_SNAPSHOT_MAX_BYTES: "33554432",
+        MCP_CONTINUITY_SNAPSHOT_MAX_DURATION_MS: "5000",
+      },
+      "/tmp",
+    );
+
+    expect(config).toMatchObject({
+      continuityStateDir: "/var/lib/mcp/continuity",
+      continuityWorkspaceAliases: [
+        { alias: "/workspace", canonical: "/shared" },
+        { alias: "/work", canonical: "/shared" },
+      ],
+      continuitySnapshotMaxFiles: 300,
+      continuitySnapshotMaxBytes: 32 * 1024 * 1024,
+      continuitySnapshotMaxDurationMs: 5000,
+    });
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_WORKSPACE_ALIASES: "workspace=/shared",
+    }, "/tmp")).toThrow("MCP_WORKSPACE_ALIASES paths must be absolute");
   });
 
   it("requires public HTTPS metadata when OAuth is enabled", () => {

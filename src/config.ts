@@ -36,6 +36,15 @@ export interface AppConfig {
   usageConsoleLog: boolean;
   buildId?: string;
   probeSecret?: string;
+  continuityStateDir: string;
+  continuityWorkspaceAliases: Array<{ alias: string; canonical: string }>;
+  continuityMaxSnapshotBytes: number;
+  continuityMaxTotalBytes: number;
+  continuityCheckpointMaxBytes: number;
+  continuityContextMaxBytes: number;
+  continuitySnapshotMaxFiles: number;
+  continuitySnapshotMaxBytes: number;
+  continuitySnapshotMaxDurationMs: number;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -70,6 +79,22 @@ function parseInteger(
     throw new Error(`${name} must be an integer ${range}`);
   }
   return parsed;
+}
+
+function parseWorkspaceAliases(value: string | undefined): Array<{ alias: string; canonical: string }> {
+  if (!value?.trim()) return [];
+  return value.split(",").map((entry) => {
+    const separator = entry.indexOf("=");
+    if (separator <= 0 || separator === entry.length - 1) {
+      throw new Error("MCP_WORKSPACE_ALIASES entries must use alias=canonical form");
+    }
+    const alias = entry.slice(0, separator).trim();
+    const canonical = entry.slice(separator + 1).trim();
+    if (!path.isAbsolute(alias) || !path.isAbsolute(canonical)) {
+      throw new Error("MCP_WORKSPACE_ALIASES paths must be absolute");
+    }
+    return { alias: path.resolve(alias), canonical: path.resolve(canonical) };
+  });
 }
 
 function normalizeEndpoint(value: string | undefined): string {
@@ -263,6 +288,55 @@ export function loadConfig(
       64 * 1024 * 1024,
       "MCP_MAX_EDIT_FILE_BYTES",
       4096,
+    ),
+    continuityStateDir: path.resolve(
+      env.MCP_CONTINUITY_STATE_DIR?.trim() ||
+        path.join(processCwd, ".chatgpt-remote-mcp-continuity"),
+    ),
+    continuityWorkspaceAliases: parseWorkspaceAliases(env.MCP_WORKSPACE_ALIASES),
+    continuityMaxSnapshotBytes: parseInteger(
+      env.MCP_CONTINUITY_MAX_SNAPSHOT_BYTES,
+      8 * 1024 * 1024,
+      "MCP_CONTINUITY_MAX_SNAPSHOT_BYTES",
+      64 * 1024,
+    ),
+    continuityMaxTotalBytes: parseInteger(
+      env.MCP_CONTINUITY_MAX_TOTAL_BYTES,
+      256 * 1024 * 1024,
+      "MCP_CONTINUITY_MAX_TOTAL_BYTES",
+      1024 * 1024,
+    ),
+    continuityCheckpointMaxBytes: parseInteger(
+      env.MCP_CONTINUITY_CHECKPOINT_MAX_BYTES,
+      32 * 1024,
+      "MCP_CONTINUITY_CHECKPOINT_MAX_BYTES",
+      4096,
+    ),
+    continuityContextMaxBytes: parseInteger(
+      env.MCP_CONTINUITY_CONTEXT_MAX_BYTES,
+      64 * 1024,
+      "MCP_CONTINUITY_CONTEXT_MAX_BYTES",
+      16 * 1024,
+    ),
+    continuitySnapshotMaxFiles: parseInteger(
+      env.MCP_CONTINUITY_SNAPSHOT_MAX_FILES,
+      200,
+      "MCP_CONTINUITY_SNAPSHOT_MAX_FILES",
+      1,
+      10_000,
+    ),
+    continuitySnapshotMaxBytes: parseInteger(
+      env.MCP_CONTINUITY_SNAPSHOT_MAX_BYTES,
+      16 * 1024 * 1024,
+      "MCP_CONTINUITY_SNAPSHOT_MAX_BYTES",
+      64 * 1024,
+    ),
+    continuitySnapshotMaxDurationMs: parseInteger(
+      env.MCP_CONTINUITY_SNAPSHOT_MAX_DURATION_MS,
+      2000,
+      "MCP_CONTINUITY_SNAPSHOT_MAX_DURATION_MS",
+      100,
+      30_000,
     ),
   };
 }

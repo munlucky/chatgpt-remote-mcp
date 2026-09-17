@@ -37,7 +37,7 @@ describe("tool authentication metadata", () => {
       MCP_OAUTH_RESOURCE: "https://mcp.example.com/mcp",
     });
 
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(24);
     for (const tool of tools) {
       expect(tool._meta, tool.name).toEqual({
         securitySchemes: [{ type: "oauth2", scopes: ["mcp:tools"] }],
@@ -48,7 +48,7 @@ describe("tool authentication metadata", () => {
   it("does not infer noauth from the internal authentication bypass", async () => {
     const tools = await listTools({ MCP_ALLOW_NO_AUTH: "true" });
 
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(24);
     for (const tool of tools) {
       expect(tool._meta, tool.name).toBeUndefined();
     }
@@ -57,7 +57,7 @@ describe("tool authentication metadata", () => {
   it("does not mislabel static bearer authentication as noauth or OAuth", async () => {
     const tools = await listTools({ MCP_AUTH_TOKEN: "static-secret" });
 
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(24);
     for (const tool of tools) {
       expect(tool._meta, tool.name).toBeUndefined();
     }
@@ -81,7 +81,7 @@ describe("client-facing metadata accuracy", () => {
   it("describes every tool and every input field", async () => {
     const tools = await listTools({ MCP_AUTH_TOKEN: "static-secret" });
 
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(24);
     for (const tool of tools) {
       expect(tool.title?.trim().length, tool.name).toBeGreaterThan(0);
       expect(tool.description?.trim().length, tool.name).toBeGreaterThan(0);

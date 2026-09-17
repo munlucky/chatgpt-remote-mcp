@@ -39,9 +39,42 @@ Nginx trust boundary. Nginx rewrites `X-Forwarded-For` to that single normalized
 address and Express trusts only the immediate Nginx hop, keeping OAuth rate limits
 separate between external clients.
 
-The MCP server publishes 21 tools, including bounded `read_files` batching. Existing
-filesystem and process tools remain available. The container has full access to
-configured mounts; protect credentials and select mounts deliberately.
+The MCP server publishes 24 tools, including bounded `read_files` batching and three
+durable continuity tools: `get_work_context`, `checkpoint_work`, and `complete_work`.
+Existing filesystem and process tools remain available. The container has full access
+to configured mounts; protect credentials and select mounts deliberately.
+
+## Task continuity contract
+
+Task continuity records bounded caller intent separately from current workspace state
+and observed process execution facts. `get_work_context` is read-only and never creates
+or resumes a task. `checkpoint_work` uses explicit `create` / `update` modes, UUID
+`requestId` idempotency, and revision CAS; stale writers fail instead of being merged.
+At most one active task is stored per workspace snapshot.
+
+For commands where duplicate execution matters, pass both `taskId` and a caller-created
+`operationId` to `exec_command` or `run_script`. The operation is durably reserved
+before spawn. Reusing the same operation ID with identical execution input returns the
+existing receipt/session instead of spawning again; different input is rejected.
+After a service restart, any prior `prepared` or `running` receipt becomes `unknown` and
+is never automatically retried. ChatGPT must inspect current files/artifacts and record
+an explicit reconciliation before a `completed` task can close over that uncertainty.
+
+The continuity store lives under `MCP_CONTINUITY_STATE_DIR` (Docker defaults to
+`MCP_STATE_DIR/continuity`) and is separate from request telemetry. Workspace snapshots
+are atomic JSON files guarded by a single writer; execution receipts are separate JSON
+records. Workspace fingerprints cover Git HEAD, branch/detached state, porcelain
+status, bounded worktree/untracked content hashes, and staged index object IDs. When a
+file/time/byte bound prevents complete inspection, context returns a partial/unknown
+observation rather than claiming equality.
+
+Schema v1 uses fail-fast migration: unsupported schema versions or corrupt JSON return
+explicit errors and are not rewritten automatically. State is retained until explicitly
+changed/closed or until the configured storage budget is exhausted; the server does not
+silently discard durable task/receipt history. Storage-full or persistence failures
+fail closed for new durable mutations. Normal service shutdown terminates managed
+processes first and waits for terminal receipt hooks; host/container crashes cannot
+prove the final side effects and therefore recover unsettled executions as `unknown`.
 
 See [performance and operations](docs/performance.md) for logging, monitoring,
 rollback and deployment details. Runtime reports under `docs/runtime/` are local and
