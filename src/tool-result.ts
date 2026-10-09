@@ -47,7 +47,12 @@ export async function runTool(
     if (metrics) metrics.toolError = false;
     return result;
   } catch (error) {
-    if (metrics) metrics.toolError = true;
+    if (metrics) {
+      metrics.toolError = true;
+      const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+      metrics.errorCategory = code === "ENOENT" ? "file_missing"
+        : code === "EACCES" || code === "EPERM" ? "permission_denied" : "tool_failure";
+    }
     return errorResult(error);
   } finally {
     if (metrics) metrics.toolMs = Math.round((performance.now() - started) * 10) / 10;

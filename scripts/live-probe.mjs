@@ -26,6 +26,24 @@ const call = async (name,args={},origin=base, trusted=true) => {
   return {ms:performance.now()-started,bytes:Buffer.byteLength(text),data:body.result.structuredContent,requestId:response.headers.get('x-request-id')};
 };
 try {
+  let catalogEvidence = {};
+  if (!preflight) {
+  const catalogResponse = await checked(await request(`${publicBase}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${tokens.access_token}`, 'x-mcp-probe-secret': process.env.MCP_PROBE_SECRET || '' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/list', params: {} }),
+  }), 200);
+  const catalog = (await catalogResponse.json()).result?.tools;
+  if (!Array.isArray(catalog) || catalog.length !== 24) throw new Error('Public tool catalog is incomplete');
+  for (const name of ['get_work_context', 'checkpoint_work', 'complete_work']) {
+    if (!catalog.some(tool => tool.name === name)) throw new Error(`Continuity tool not advertised: ${name}`);
+  }
+  for (const name of ['exec_command', 'run_script']) {
+    const properties = catalog.find(tool => tool.name === name)?.inputSchema?.properties;
+    if (!properties?.taskId || !properties?.operationId) throw new Error(`Execution tracking fields not advertised: ${name}`);
+  }
+  catalogEvidence = { publicToolCount: catalog.length, continuityToolsAdvertised: true, executionTrackingAdvertised: true, toolCatalogDigest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex') };
+  }
   const processes=await call('list_processes');
   const entries = processes.data.processes;
   if (!Array.isArray(entries)) throw new Error('Unexpected process listing');
@@ -53,7 +71,7 @@ try {
     }
     if(!classificationVerified)throw new Error('Live probe classification evidence missing');
     const p=(a,q)=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*q)-1];
-    console.log(JSON.stringify({classificationVerified,publicHealthMinimal:true,diagnosticsProtected:true,healthy:health.status==='ok',buildId:diagnostics.buildId,telemetry:diagnostics.telemetry,oauthAuthenticated:true,publicMcpAuthenticated:true,unauthenticatedStatus:unauthorized.status,batchCount:batch.data.count,batchPublicMs:batch.ms,batchResponseBytes:batch.bytes,listDirectory:{samples:listing.length,p50Ms:p(listing,.5),p95Ms:p(listing,.95)},activeManagedProcesses:active}));
+    console.log(JSON.stringify({...catalogEvidence,classificationVerified,publicHealthMinimal:true,diagnosticsProtected:true,healthy:health.status==='ok',buildId:diagnostics.buildId,telemetry:diagnostics.telemetry,oauthAuthenticated:true,publicMcpAuthenticated:true,unauthenticatedStatus:unauthorized.status,batchCount:batch.data.count,batchPublicMs:batch.ms,batchResponseBytes:batch.bytes,listDirectory:{samples:listing.length,p50Ms:p(listing,.5),p95Ms:p(listing,.95)},activeManagedProcesses:active}));
   }
 } finally {
   for(const token of [tokens.access_token,tokens.refresh_token])if(token)await checked(await request(`${base}/revoke`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:client.client_id,token})}),200);

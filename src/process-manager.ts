@@ -26,6 +26,7 @@ interface ManagedProcess {
   timedOut: boolean;
   spawnFailed: boolean;
   onTerminal: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
+  terminalObserver: ((event: ProcessTerminalEvent) => void) | undefined;
   terminalPromise: Promise<void> | undefined;
   outputBuffer: IndexedProcessOutputBuffer;
   pendingOutput: Record<ProcessOutputStream, Buffer>;
@@ -132,6 +133,8 @@ function splitOutputChunks(
 
 export interface ProcessTerminalEvent {
   sessionId: string;
+  startedAt: string;
+  endedAt: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
@@ -182,6 +185,7 @@ export interface ProcessReadResult {
 }
 
 export interface ProcessManagerOptions {
+  observeTerminal?: (process: { sessionId: string; startedAt: string }) => ((event: ProcessTerminalEvent) => void) | undefined;
   maxRetainedOutputBytes: number;
   maxTotalRetainedOutputBytes: number;
   processRetentionMs: number;
@@ -223,6 +227,7 @@ export class ProcessManager {
     this.#ensureExecutionCapacity();
 
     const sessionId = request.sessionId ?? randomUUID();
+    const startedAt = Date.now();
     const child = spawn(request.executable, request.args, {
       cwd: request.cwd,
       env: { ...process.env, ...request.env },
@@ -230,12 +235,16 @@ export class ProcessManager {
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+    let terminalObserver: ManagedProcess["terminalObserver"];
+    try {
+      terminalObserver = this.#options.observeTerminal?.({ sessionId, startedAt: new Date(startedAt).toISOString() });
+    } catch { /* observation must not orphan a spawned process */ }
     const managed: ManagedProcess = {
       sessionId,
       child,
       command: request.commandForDisplay,
       cwd: request.cwd,
-      startedAt: Date.now(),
+      startedAt,
       endedAt: undefined,
       exitCode: undefined,
       signal: undefined,
@@ -243,6 +252,7 @@ export class ProcessManager {
       timedOut: false,
       spawnFailed: false,
       onTerminal: request.onTerminal,
+      terminalObserver,
       terminalPromise: undefined,
       outputBuffer: new IndexedProcessOutputBuffer(),
       pendingOutput: { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) },
@@ -667,10 +677,10 @@ export class ProcessManager {
   }
 
   #emitTerminal(managed: ManagedProcess): void {
-    if (!managed.onTerminal) return;
-    const pending = Promise.resolve(
-      managed.onTerminal({
+    const event: ProcessTerminalEvent = {
         sessionId: managed.sessionId,
+        startedAt: new Date(managed.startedAt).toISOString(),
+        endedAt: new Date(managed.endedAt!).toISOString(),
         exitCode: managed.exitCode ?? null,
         signal: managed.signal ?? null,
         timedOut: managed.timedOut,
@@ -683,8 +693,11 @@ export class ProcessManager {
             : managed.error
               ? "process_error"
               : null,
-      }),
-    )
+      };
+    // Observation is independent of task receipts and must never prevent them.
+    try { managed.terminalObserver?.(event); } catch { /* observer is best-effort */ }
+    if (!managed.onTerminal) return;
+    const pending = Promise.resolve().then(() => managed.onTerminal!(event))
       .catch(() => undefined)
       .finally(() => this.#pendingLifecycle.delete(pending));
     managed.terminalPromise = pending;

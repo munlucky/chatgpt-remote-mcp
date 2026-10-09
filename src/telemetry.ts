@@ -3,6 +3,11 @@ import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 export interface RequestMetrics {
+  clientClass?: "codex" | "openai_mcp" | "other";
+  requestId?: string;
+  trafficClass?: "probe" | "usage";
+  toolName?: string | null;
+  errorCategory?: "file_missing" | "permission_denied" | "tool_failure";
   setupMs: number | null;
   toolMs: number | null;
   toolError: boolean | null;
@@ -32,6 +37,41 @@ export interface UsageEvent {
   toolError: boolean | null;
   responseBytes: number | null;
   trafficClass?: "probe" | "usage";
+  errorCategory?: RequestMetrics["errorCategory"];
+  clientClass?: RequestMetrics["clientClass"];
+}
+
+export interface ProcessUsageEvent {
+  event: "process_terminal";
+  timestamp: string;
+  requestId: string;
+  buildId: string;
+  bootId: string;
+  clientClass?: RequestMetrics["clientClass"];
+  trafficClass: "probe" | "usage";
+  toolName: "exec_command" | "run_script";
+  sessionId: string;
+  startedAt: string;
+  endedAt: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  spawnFailed: boolean;
+  totalOutputBytes: number;
+  errorCode: string | null;
+}
+
+export interface ProcessStartedEvent {
+  event: "process_started";
+  timestamp: string;
+  requestId: string;
+  buildId: string;
+  bootId: string;
+  clientClass?: RequestMetrics["clientClass"];
+  trafficClass: "probe" | "usage";
+  toolName: "exec_command" | "run_script";
+  sessionId: string;
+  startedAt: string;
 }
 
 const MAX_PENDING_EVENTS = 1000;
@@ -62,7 +102,7 @@ export class UsageLog {
     return this.#pending;
   }
 
-  record(event: UsageEvent): void {
+  record(event: UsageEvent | ProcessUsageEvent | ProcessStartedEvent): void {
     if (!this.directory) return;
     if (this.#pending >= MAX_PENDING_EVENTS) {
       this.droppedEvents++;

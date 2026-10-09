@@ -15,7 +15,7 @@ import type { AppConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
 import { createMcpServer, type McpServices } from "./mcp-server.js";
 import { OAUTH_SCOPES, RemoteDevOAuthProvider } from "./oauth.js";
-import { requestMetrics, safeRpcName, UsageLog, type RequestMetrics, type UsageEvent } from "./telemetry.js";
+import { requestMetrics, safeRpcName, type RequestMetrics, type UsageEvent } from "./telemetry.js";
 
 interface ActiveRequest {
   server: ReturnType<typeof createMcpServer>;
@@ -63,7 +63,7 @@ export async function startHttpServer(
   if (config.oauthEnabled && (config.oauthAccessTokenTtlSeconds > 3600 || config.oauthRefreshTokenTtlSeconds > 2592000)) {
     console.warn("OAuth migration warning: configured TTL exceeds the recommended 1h access / 30d refresh policy. Update existing .env overrides; changing TTL does not invalidate issued tokens. See docs/security-migration.md.");
   }
-  const usageLog = new UsageLog(config.usageLogDir, config.usageLogMaxBytes, config.usageLogFiles);
+  const usageLog = services.usageLog;
   const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   eventLoopDelay.enable();
   const eventLoopStart = nodePerformance.eventLoopUtilization();
@@ -78,7 +78,11 @@ export async function startHttpServer(
     }
     const requestId = randomUUID();
     const startedAt = performance.now();
-    const metrics: RequestMetrics = { setupMs: null, toolMs: null, toolError: null };
+    const userAgent = request.get("user-agent") || "";
+    const metrics: RequestMetrics = {
+      requestId, setupMs: null, toolMs: null, toolError: null,
+      clientClass: userAgent.includes("Codex") ? "codex" : userAgent.includes("openai-mcp") ? "openai_mcp" : "other",
+    };
     let responseBytes = 0;
     const countChunk = (chunk: unknown, encoding?: unknown) => {
       if (typeof chunk === "string") responseBytes += Buffer.byteLength(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8");
@@ -108,13 +112,17 @@ export async function startHttpServer(
           trafficClass: response.locals.authenticatedMcp === true && config.probeSecret
             && tokensEqual(request.get("x-mcp-probe-secret") || "", config.probeSecret) ? "probe" : "usage",
           requestId,
+          clientClass: metrics.clientClass,
           httpMethod: request.method,
           rpcMethod: safeRpcName(rpcMethod(request.body), "method"),
           toolName: safeRpcName(rpcToolName(request.body), "tool"),
           status: response.statusCode,
           outcome,
           durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
-          ...metrics,
+          setupMs: metrics.setupMs,
+          toolMs: metrics.toolMs,
+          toolError: metrics.toolError,
+          ...(metrics.errorCategory ? { errorCategory: metrics.errorCategory } : {}),
           responseBytes: outcome === "completed" ? responseBytes : null,
         };
       if (config.usageConsoleLog) console.log(JSON.stringify(event));
@@ -228,6 +236,12 @@ export async function startHttpServer(
 
   const postHandler = async (request: Request, response: Response): Promise<void> => {
     response.locals.authenticatedMcp = !config.allowNoAuth || Boolean(config.authToken || oauthProvider);
+    const context = requestMetrics.getStore();
+    if (context) {
+      context.toolName = safeRpcName(rpcToolName(request.body), "tool");
+      context.trafficClass = response.locals.authenticatedMcp === true && config.probeSecret
+        && tokensEqual(request.get("x-mcp-probe-secret") || "", config.probeSecret) ? "probe" : "usage";
+    }
     const setupStarted = performance.now();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

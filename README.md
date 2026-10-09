@@ -38,6 +38,23 @@ Use the Windows PC and Docker Desktop as the verification/deployment surface:
 - `npm run integration:docker -- --live` or `MCP_VERIFY_LIVE=1 npm run integration:docker`: isolated verification followed by the live checks
 - `scripts/usage-report.ps1 -Hours 24`: aggregate actual usage, excluding only authenticated probes carrying the independent probe secret
 
+Request success and command success are separate observations. The bounded usage
+log records `process_started` and `process_terminal` metadata independently of the
+HTTP response, including request/session/boot IDs, exit code, timeout and signal.
+It never records command bodies, paths, output contents or tokens. Missing terminal
+metadata does not authorize a retry; durable continuity receipts remain authoritative.
+Reports separate client classes inferred from User-Agent (not authenticated identity)
+and support exact, start-inclusive/end-exclusive timestamp boundaries:
+
+```bash
+node scripts/usage-report.mjs /var/log/mcp-usage --since 2026-10-09T00:00:00+09:00 --until 2026-10-10T00:00:00+09:00
+```
+
+The live verifier also checks the public tool catalog for all 24 tools, the three
+continuity tools and execution tracking inputs, and returns its catalog digest.
+Server catalog verification does not prove that a client's connector catalog has
+refreshed. Resolve connector catalog differences without modifying project tasks.
+
 Cloudflare's canonical client address is accepted only at the local cloudflared →
 Nginx trust boundary. Nginx rewrites `X-Forwarded-For` to that single normalized
 address and Express trusts only the immediate Nginx hop, keeping OAuth rate limits

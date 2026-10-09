@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { randomUUID } from "node:crypto";
 
 import { createBatchReadRegistrar } from "./batch-read.js";
 import type { AppConfig } from "./config.js";
@@ -12,8 +13,10 @@ import { FileService } from "./file-service.js";
 import { createFileToolRegistrar } from "./file-tools.js";
 import { ProcessManager } from "./process-manager.js";
 import type { CachedToolRegistrar } from "./tool-metadata.js";
+import { requestMetrics, UsageLog } from "./telemetry.js";
 
 export interface McpServices {
+  usageLog: UsageLog;
   processManager: ProcessManager;
   fileService: FileService;
   continuityService: TaskContinuityService;
@@ -22,7 +25,32 @@ export interface McpServices {
 }
 
 export function createServices(config: AppConfig): McpServices {
+  const usageLog = new UsageLog(config.usageLogDir, config.usageLogMaxBytes, config.usageLogFiles);
+  const bootId = randomUUID();
   const processManager = new ProcessManager({
+    observeTerminal: (process) => {
+      const metrics = requestMetrics.getStore();
+      const requestId = metrics?.requestId;
+      const toolName = metrics?.toolName;
+      if (!requestId || (toolName !== "exec_command" && toolName !== "run_script")) return undefined;
+      const trafficClass = metrics?.trafficClass ?? "usage";
+      const clientClass = metrics?.clientClass;
+      usageLog.record({
+        ...process, event: "process_started", timestamp: process.startedAt,
+        requestId, toolName, trafficClass, clientClass, bootId, buildId: config.buildId || "unknown",
+      });
+      return (event) => usageLog.record({
+        ...event,
+        event: "process_terminal",
+        timestamp: event.endedAt,
+        requestId,
+        toolName,
+        trafficClass,
+        clientClass,
+        bootId,
+        buildId: config.buildId || "unknown",
+      });
+    },
     maxRetainedOutputBytes: config.maxRetainedProcessOutputBytes,
     maxTotalRetainedOutputBytes: config.maxTotalRetainedProcessOutputBytes,
     processRetentionMs: config.processRetentionMs,
@@ -83,6 +111,7 @@ export function createServices(config: AppConfig): McpServices {
   };
 
   return {
+    usageLog,
     processManager,
     fileService,
     continuityService,
