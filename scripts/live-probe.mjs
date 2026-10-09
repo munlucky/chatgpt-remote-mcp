@@ -74,5 +74,8 @@ try {
     console.log(JSON.stringify({...catalogEvidence,classificationVerified,publicHealthMinimal:true,diagnosticsProtected:true,healthy:health.status==='ok',buildId:diagnostics.buildId,telemetry:diagnostics.telemetry,oauthAuthenticated:true,publicMcpAuthenticated:true,unauthenticatedStatus:unauthorized.status,batchCount:batch.data.count,batchPublicMs:batch.ms,batchResponseBytes:batch.bytes,listDirectory:{samples:listing.length,p50Ms:p(listing,.5),p95Ms:p(listing,.95)},activeManagedProcesses:active}));
   }
 } finally {
-  for(const token of [tokens.access_token,tokens.refresh_token])if(token)await checked(await request(`${base}/revoke`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:client.client_id,token})}),200);
+  // This provider revokes the whole grant, including both tokens, in one request.
+  // A second revocation only consumes another slot in the endpoint's rate limit.
+  const token = tokens.refresh_token || tokens.access_token;
+  if(token)await checked(await request(`${base}/revoke`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:client.client_id,token})}),200);
 }

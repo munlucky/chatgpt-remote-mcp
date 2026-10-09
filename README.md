@@ -67,6 +67,33 @@ to configured mounts; protect credentials and select mounts deliberately.
 
 ## Task continuity contract
 
+### Recovering a disconnected ChatGPT response
+
+A browser response stream and an MCP process are separate observations. A disconnected
+banner does not prove that a command stopped. HTTP 200 from MCP does not prove that a
+command succeeded. Inspect existing process state and durable execution receipts first.
+
+For a ChatGPT HTTP 429 response, wait for its `Retry-After` interval before retrying
+the affected endpoint. Avoid repeated refreshes and new prompts during that interval.
+`Resume stream unavailable` means that the requested response stream cannot be resumed;
+it does not authorize replaying project commands or issuing a new task contract.
+After the cooldown, reload the existing conversation once. If it remains stuck, stop
+the stale response and explicitly continue from the first unfinished step after checking
+current workspace state. Do not automatically resend commands with side effects.
+
+If the issue repeats, record timestamps with timezone, endpoint path, HTTP status,
+`Retry-After`, and corresponding MCP request/process outcomes. Keep authorization
+headers, cookies, tokens and message contents out of diagnostic artifacts. Separate
+ChatGPT API failures from MCP, OAuth and tunnel failures; do not change project work
+units to repair a browser stream. Browser recovery does not prove the original cause.
+
+Deployment probes revoke one token grant per run. The provider invalidates both access
+and refresh tokens together. Keep scheduled preflight checks at a two-minute interval
+or longer, and keep the active-process restart guard enabled. Do not reduce OAuth rate
+limits or force a restart to compensate for a failed probe.
+
+### Durable execution state
+
 Task continuity records bounded caller intent separately from current workspace state
 and observed process execution facts. `get_work_context` is read-only and never creates
 or resumes a task. `checkpoint_work` uses explicit `create` / `update` modes, UUID
