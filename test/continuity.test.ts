@@ -278,6 +278,12 @@ describe.sequential("durable task continuity", () => {
         ]),
       },
     });
+    const summary = await secondServices.continuityService.context({ taskId, format: "summary" });
+    expect(summary).toMatchObject({
+      executions: { counts: { unsettled: 1 }, unsettled: [expect.objectContaining({ operationId, state: "unknown" })] },
+      recovery: { automaticRetryAllowed: false },
+    });
+    expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThan(16 * 1024);
     await expect(
       secondServices.continuityService.complete({
         taskId,
@@ -316,6 +322,37 @@ describe.sequential("durable task continuity", () => {
         evidenceRefs: [],
       }),
     ).resolves.toMatchObject({ status: "completed", revision: 3 });
+  });
+
+  it("keeps all unsettled counts when a compact recovery summary omits receipt details", async () => {
+    const root = await createRoot("mcp-continuity-summary-");
+    roots.push(root);
+    const services = servicesFor(root);
+    openServices.push(services);
+    const created = await services.continuityService.create({
+      cwd: root, requestId: randomUUID(), objective: "inspect uncertainty before continuing",
+      checkpoint: { ...checkpoint(), completed: Array.from({ length: 20 }, (_, i) => `completed stage ${i}`) },
+    });
+    const taskId = String(created.taskId);
+    for (let index = 0; index < 11; index += 1) {
+      await services.executionRecorder.prepare({
+        taskId, operationId: randomUUID(), cwd: root, toolKind: "exec_command",
+        semanticInput: { logicalStep: index },
+      });
+    }
+    const summary = await services.continuityService.context({ taskId, format: "summary" });
+    expect(summary).toMatchObject({
+      task: { revision: 1, checkpoint: { completed: ["completed stage 15", "completed stage 16", "completed stage 17", "completed stage 18", "completed stage 19"] } },
+      executions: { counts: { unsettled: 11 } },
+      summaryOmissions: { unsettledExecutions: 1, completed: 15 },
+      recovery: { automaticRetryAllowed: false },
+    });
+    expect((summary.executions as { unsettled: unknown[] }).unsettled).toHaveLength(10);
+    expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThan(16 * 1024);
+    await expect(services.continuityService.complete({
+      taskId, requestId: randomUUID(), expectedRevision: 1, outcome: "completed",
+      summary: "cannot close with omitted unsettled receipts", evidenceRefs: [],
+    })).rejects.toMatchObject({ code: "unresolved_execution" });
   });
 
   it("detects index-only drift even when status and worktree bytes are unchanged", async () => {

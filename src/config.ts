@@ -37,6 +37,7 @@ export interface AppConfig {
   buildId?: string;
   probeSecret?: string;
   continuityStateDir: string;
+  executionTracking: "optional" | "required";
   continuityWorkspaceAliases: Array<{ alias: string; canonical: string }>;
   continuityMaxSnapshotBytes: number;
   continuityMaxTotalBytes: number;
@@ -206,6 +207,10 @@ export function loadConfig(
     1,
     maxProcesses,
   );
+  const executionTracking = env.MCP_EXECUTION_TRACKING?.trim() || "optional";
+  if (executionTracking !== "optional" && executionTracking !== "required") {
+    throw new Error("MCP_EXECUTION_TRACKING must be optional or required");
+  }
 
   return {
     probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
@@ -293,6 +298,7 @@ export function loadConfig(
       env.MCP_CONTINUITY_STATE_DIR?.trim() ||
         path.join(processCwd, ".chatgpt-remote-mcp-continuity"),
     ),
+    executionTracking,
     continuityWorkspaceAliases: parseWorkspaceAliases(env.MCP_WORKSPACE_ALIASES),
     continuityMaxSnapshotBytes: parseInteger(
       env.MCP_CONTINUITY_MAX_SNAPSHOT_BYTES,

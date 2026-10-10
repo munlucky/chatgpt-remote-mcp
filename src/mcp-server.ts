@@ -134,7 +134,7 @@ export function createMcpServer(
     },
     {
       instructions:
-        "This server is an unrestricted remote development environment. Tools operate directly on the host with the MCP service process's full OS permissions. For long-running work, call get_work_context before deciding what to do, create/update bounded checkpoints with checkpoint_work, and use taskId+operationId together on exec_command/run_script when duplicate execution would be unsafe. Durable receipts record observed execution facts; checkpoints are caller summaries and current workspace state remains authoritative. Never automatically re-run a prepared/running/unknown tracked operation. Use complete_work only after current workspace/evidence review. Untracked process and file tools retain their existing behavior.",
+        `Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Checkpoint after verified stages; process exit is not task completion. Tracking policy: ${config.executionTracking}. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`,
       capabilities: { logging: {} },
     },
   );

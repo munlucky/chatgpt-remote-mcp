@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import path from "node:path";
 import * as z from "zod/v4";
 
 import type { AppConfig } from "./config.js";
@@ -17,21 +18,40 @@ import {
 } from "./tool-metadata.js";
 
 const DEFAULT_PROCESS_POLL_AFTER_MS = 1000;
+const RECOVERY_OUTPUT_BYTES = 16 * 1024;
 
 function processResult(
   result: Awaited<ReturnType<ProcessManager["read"]>>,
-  tracking?: { taskId: string; operationId: string; executionState?: string } | undefined,
+  tracking?: { taskId: string; operationId: string; executionState?: string; persistenceState?: string } | undefined,
 ): Record<string, unknown> {
+  // The manager's workspace binding is internal. Keep IDs visible to clients,
+  // including clients which consume only the text content block.
+  const { tracking: _binding, ...process } = result;
+  const nextCall = result.running || result.hasMore
+    ? {
+        tool: "read_process",
+        arguments: {
+          sessionId: result.sessionId,
+          afterSeq: result.nextSeq,
+          waitMs: result.hasMore ? 0 : DEFAULT_PROCESS_POLL_AFTER_MS,
+          maxOutputBytes: RECOVERY_OUTPUT_BYTES,
+        },
+      }
+    : tracking
+      ? { tool: "get_work_context", arguments: { taskId: tracking.taskId } }
+      : undefined;
   return {
-    ...result,
+    ...process,
     status: result.running ? "accepted" : "completed",
     completed: !result.running,
     ...(result.running ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
+    ...(nextCall ? { nextCall } : {}),
     ...(tracking
       ? {
           taskId: tracking.taskId,
           operationId: tracking.operationId,
           executionState: tracking.executionState ?? (result.running ? "running" : "exited"),
+          persistenceState: tracking.persistenceState,
         }
       : {}),
   };
@@ -54,14 +74,30 @@ function receiptReplayResult(record: ExecutionRecord): Record<string, unknown> {
     errorCode: record.errorCode,
     persistenceState: record.persistenceState,
     ...(record.state === "running" ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
+    nextCall: { tool: "get_work_context", arguments: { taskId: record.taskId } },
   };
 }
 
-function requireTrackingPair(taskId: string | undefined, operationId: string | undefined): void {
+function requireTrackingPair(
+  taskId: string | undefined,
+  operationId: string | undefined,
+  config: AppConfig,
+  cwd: string,
+): void {
   if (Boolean(taskId) !== Boolean(operationId)) {
     throw new McpToolError(
       "idempotency_conflict",
       "taskId and operationId must be provided together for tracked execution",
+    );
+  }
+  if (!taskId && config.executionTracking === "required") {
+    throw new McpToolError(
+      "tracking_required",
+      "Execution was not started. Read existing work context, create a checkpoint only if no active task exists, then supply taskId and operationId. Do not reissue an existing project task contract.",
+      {
+        executionTracking: "required",
+        nextCall: { tool: "get_work_context", arguments: { cwd } },
+      },
     );
   }
 }
@@ -82,7 +118,22 @@ async function trackedProcessResult(
     taskId,
     operationId,
     executionState: receipt?.state ?? (result.running ? "running" : "unknown"),
+    persistenceState: receipt?.persistenceState ?? "degraded",
   });
+}
+
+async function observedProcessResult(
+  processManager: ProcessManager,
+  executionRecorder: ExecutionRecorder,
+  result: Awaited<ReturnType<ProcessManager["read"]>>,
+): Promise<Record<string, unknown>> {
+  const binding = result.tracking;
+  return binding
+    ? trackedProcessResult(
+        processManager, executionRecorder, result,
+        binding.taskId, binding.operationId, binding.workspaceId,
+      )
+    : processResult(result);
 }
 
 const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
@@ -90,6 +141,11 @@ const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
     const output = typeof data.output === "string" ? data.output : "";
     const summary = JSON.stringify({
       sessionId: data.sessionId,
+      taskId: data.taskId,
+      operationId: data.operationId,
+      executionState: data.executionState,
+      persistenceState: data.persistenceState,
+      duplicate: data.duplicate,
       status: data.status,
       running: data.running,
       completed: data.completed,
@@ -98,10 +154,12 @@ const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
       signal: data.signal,
       timedOut: data.timedOut,
       error: data.error,
+      errorCode: data.errorCode,
       nextSeq: data.nextSeq,
       hasMore: data.hasMore,
       totalOutputBytes: data.totalOutputBytes,
       droppedOutputBytes: data.droppedOutputBytes,
+      nextCall: data.nextCall,
     });
     return output.length > 0 ? `${summary}\n${output}` : summary;
   },
@@ -138,7 +196,7 @@ export function registerExecTools(
     .string()
     .uuid()
     .optional()
-    .describe("Continuity task ID. Provide together with operationId to durably track this execution; omit both for legacy untracked execution.");
+    .describe(`Continuity task ID from checkpoint_work/get_work_context. Provide together with operationId. Tracking policy is ${config.executionTracking}; required mode rejects an untracked execution before spawn.`);
   const operationIdSchema = z
     .string()
     .uuid()
@@ -173,7 +231,7 @@ export function registerExecTools(
     {
       title: "Execute command",
       description:
-        "Run an unrestricted shell command on the host. The command inherits the MCP server's full OS permissions, environment, filesystem, and network access. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process or write_stdin.",
+        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Run an unrestricted shell command on the host with the service's full OS permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; follow nextCall with read_process or write_stdin. Never use a new operationId to retry an uncertain execution.`,
       inputSchema: {
         taskId: taskIdSchema,
         operationId: operationIdSchema,
@@ -223,7 +281,7 @@ export function registerExecTools(
       runProcessTool(async () => {
         const cwd = fileService.resolve(".", workdir);
         const executable = shell || config.defaultShell;
-        requireTrackingPair(taskId, operationId);
+        requireTrackingPair(taskId, operationId, config, cwd);
         const tracking = taskId && operationId
           ? await executionRecorder.prepare({
               taskId,
@@ -235,19 +293,19 @@ export function registerExecTools(
           : undefined;
         if (tracking && !tracking.shouldSpawn) {
           if (
-            tracking.record.state === "running" &&
+            ["running", "exited", "spawn_failed"].includes(tracking.record.state) &&
             tracking.record.sessionId &&
             tracking.record.bootId === executionRecorder.store.bootId
           ) {
             try {
-              return trackedProcessResult(
+              return { ...await trackedProcessResult(
                 processManager,
                 executionRecorder,
                 await processManager.read(tracking.record.sessionId, { maxOutputBytes }),
                 taskId!,
                 operationId!,
                 tracking.record.workspaceId,
-              );
+              ), duplicate: true };
             } catch {
               // Durable receipt remains authoritative if the in-memory session was evicted.
             }
@@ -267,6 +325,7 @@ export function registerExecTools(
             stdin,
             ...(tracking
               ? {
+                  tracking: { taskId: taskId!, operationId: operationId!, workspaceId: tracking.record.workspaceId },
                   onTerminal: async (event) => {
                     await executionRecorder.markTerminal(tracking.record.workspaceId, operationId!, event);
                   },
@@ -311,7 +370,7 @@ export function registerExecTools(
     {
       title: "Run script",
       description:
-        "Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution is unrestricted and has the MCP server's full host permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; continue with read_process.",
+        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution has the service's full host permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; follow nextCall with read_process. Never use a new operationId to retry an uncertain execution.`,
       inputSchema: {
         taskId: taskIdSchema,
         operationId: operationIdSchema,
@@ -374,7 +433,7 @@ export function registerExecTools(
     }) =>
       runProcessTool(async () => {
         const cwd = fileService.resolve(".", workdir);
-        requireTrackingPair(taskId, operationId);
+        requireTrackingPair(taskId, operationId, config, cwd);
         const tracking = taskId && operationId
           ? await executionRecorder.prepare({
               taskId,
@@ -397,19 +456,19 @@ export function registerExecTools(
           : undefined;
         if (tracking && !tracking.shouldSpawn) {
           if (
-            tracking.record.state === "running" &&
+            ["running", "exited", "spawn_failed"].includes(tracking.record.state) &&
             tracking.record.sessionId &&
             tracking.record.bootId === executionRecorder.store.bootId
           ) {
             try {
-              return trackedProcessResult(
+              return { ...await trackedProcessResult(
                 processManager,
                 executionRecorder,
                 await processManager.read(tracking.record.sessionId, { maxOutputBytes }),
                 taskId!,
                 operationId!,
                 tracking.record.workspaceId,
-              );
+              ), duplicate: true };
             } catch {
               // Durable receipt remains authoritative if the in-memory session was evicted.
             }
@@ -434,6 +493,7 @@ export function registerExecTools(
             keepScript,
             ...(tracking
               ? {
+                  tracking: { taskId: taskId!, operationId: operationId!, workspaceId: tracking.record.workspaceId },
                   onStarted: async (sessionId) => {
                     spawnedSessionId = sessionId;
                     try {
@@ -514,7 +574,7 @@ export function registerExecTools(
           waitMs: closeStdin ? 0 : yieldTimeMs,
           maxOutputBytes,
         });
-        return processResult(result);
+        return observedProcessResult(processManager, executionRecorder, result);
       }),
   );
 
@@ -523,7 +583,7 @@ export function registerExecTools(
     {
       title: "Read process output",
       description:
-        "Poll a managed process for output and terminal state. Pass the previous nextSeq as afterSeq to receive only newer output.",
+        "Poll a managed process for output and terminal state, including its task/operation IDs and durable execution state when tracked. Follow nextCall; pass the previous nextSeq as afterSeq to receive only newer output. Process completion is not task completion. Use list_processes for compact status without output.",
       inputSchema: {
         sessionId: sessionIdSchema,
         afterSeq: afterSeqSchema,
@@ -543,7 +603,9 @@ export function registerExecTools(
     },
     async ({ sessionId, afterSeq, waitMs, maxOutputBytes }) =>
       runProcessTool(async () =>
-        processResult(
+        observedProcessResult(
+          processManager,
+          executionRecorder,
           await processManager.read(sessionId, {
             afterSeq,
             waitMs,
@@ -580,7 +642,7 @@ export function registerExecTools(
     },
     async ({ sessionId, signal, graceMs }) =>
       runProcessTool(async () =>
-        processResult(await processManager.terminate(sessionId, signal, graceMs)),
+        observedProcessResult(processManager, executionRecorder, await processManager.terminate(sessionId, signal, graceMs)),
       ),
   );
 
@@ -588,12 +650,34 @@ export function registerExecTools(
     "list_processes",
     {
       title: "List managed processes",
-      description: "List running and recently completed process sessions.",
-      inputSchema: {},
+      description: "Read compact process metadata without output or command bodies by default. Filter by taskId or exact cwd to avoid mixing projects. Running sessions sort first, followed by newest starts. Counts cover all matching retained sessions even when the result is limited. availableThroughSeq is the latest available output sequence, not an acknowledgement that output was read; retain your previous nextSeq for read_process.",
+      inputSchema: {
+        taskId: z.string().uuid().optional().describe("Filter by continuity task ID. Untracked sessions are excluded when this filter is supplied."),
+        cwd: z.string().min(1).optional().describe("Filter by exact process working directory; relative paths resolve from the default working directory. Different alias paths are distinct; prefer taskId across aliases."),
+        runningOnly: z.boolean().default(false).describe("Return only currently running process sessions."),
+        limit: z.number().int().min(1).max(100).default(20).describe("Maximum returned entries. Counts include matching entries omitted by this limit."),
+        includeCommand: z.boolean().default(false).describe("Explicitly include command bodies. Leave false for compact, metadata-only status checks."),
+      },
       annotations: TOOL_ANNOTATIONS.readOnlyClosed,
       _meta: authMetadata,
     },
-    async () => runTool(() => ({ processes: processManager.list() })),
+    async ({ taskId, cwd, runningOnly, limit, includeCommand }) => runTool(() => {
+      const resolvedCwd = cwd ? fileService.resolve(".", cwd) : undefined;
+      const entries = processManager.list().filter((entry) =>
+        (!taskId || entry.tracking?.taskId === taskId) &&
+        (!resolvedCwd || path.resolve(entry.cwd) === resolvedCwd) &&
+        (!runningOnly || entry.running),
+      ).sort((a, b) => Number(b.running) - Number(a.running) || b.startedAt.localeCompare(a.startedAt));
+      return {
+        processes: entries.slice(0, limit).map(({ command, tracking, ...entry }) => ({
+          ...entry,
+          ...(tracking ? { taskId: tracking.taskId, operationId: tracking.operationId } : {}),
+          ...(includeCommand ? { command } : {}),
+        })),
+        counts: { matching: entries.length, running: entries.filter((entry) => entry.running).length, returned: Math.min(entries.length, limit) },
+        truncated: entries.length > limit,
+      };
+    }),
   );
 }
 

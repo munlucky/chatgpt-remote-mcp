@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import type { ProcessReadResult, ProcessTerminalEvent } from "./process-manager.js";
+import type { ProcessReadResult, ProcessTerminalEvent, ProcessTracking } from "./process-manager.js";
 import { ProcessManager } from "./process-manager.js";
 
 export type ScriptRuntime = "bash" | "sh" | "node" | "python" | "custom";
@@ -24,6 +24,7 @@ export interface RunScriptRequest {
   keepScript?: boolean | undefined;
   onStarted?: ((sessionId: string) => Promise<void> | void) | undefined;
   onTerminal?: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
+  tracking?: ProcessTracking | undefined;
 }
 
 export interface RunScriptResult extends ProcessReadResult {
@@ -95,6 +96,7 @@ export async function runScript(
       stdin: request.stdin,
       cleanup,
       onTerminal: request.onTerminal,
+      tracking: request.tracking,
     });
   } catch (error) {
     await rm(temporaryDirectory, { recursive: true, force: true });

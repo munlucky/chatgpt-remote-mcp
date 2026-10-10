@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { McpToolError } from "../errors.js";
+import { summarizeContext } from "./context-summary.js";
 import type { ExecutionRecorder } from "./execution-recorder.js";
 import type { TaskStore } from "./task-store.js";
 import type {
@@ -307,7 +308,18 @@ export class TaskContinuityService {
     taskId?: string | undefined;
     recentExecutionLimit?: number | undefined;
     candidateLimit?: number | undefined;
+    format?: "summary" | "full" | undefined;
   }): Promise<Record<string, unknown>> {
+    const context = await this.readContext(input, input.format === "summary");
+    return input.format === "summary" ? summarizeContext(context, this.options.contextMaxBytes) : context;
+  }
+
+  private async readContext(input: {
+    cwd?: string | undefined;
+    taskId?: string | undefined;
+    recentExecutionLimit?: number | undefined;
+    candidateLimit?: number | undefined;
+  }, compact = false): Promise<Record<string, unknown>> {
     await this.initialize();
     let selected: SelectedTask | null = null;
     let candidateResult:
@@ -429,6 +441,9 @@ export class TaskContinuityService {
       },
     };
 
+    // Do not discard recent receipts to make room for file fingerprints that
+    // the compact view will omit anyway.
+    if (compact) return response;
     while (Buffer.byteLength(JSON.stringify(response)) > this.options.contextMaxBytes && recent.length > 0) {
       recent = recent.slice(0, -1);
       (response.executions as Record<string, unknown>).recent = recent;

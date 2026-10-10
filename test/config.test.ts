@@ -38,6 +38,7 @@ describe("loadConfig", () => {
       maxRunningProcesses: 12,
       usageConsoleLog: false,
       continuityMaxSnapshotBytes: 8 * 1024 * 1024,
+      executionTracking: "optional",
       continuityMaxTotalBytes: 256 * 1024 * 1024,
       continuityCheckpointMaxBytes: 32 * 1024,
       continuityContextMaxBytes: 64 * 1024,
@@ -114,6 +115,11 @@ describe("loadConfig", () => {
       MCP_AUTH_TOKEN: "secret",
       MCP_WORKSPACE_ALIASES: "workspace=/shared",
     }, "/tmp")).toThrow("MCP_WORKSPACE_ALIASES paths must be absolute");
+  });
+
+  it("enables required execution tracking only with a valid explicit setting", () => {
+    expect(loadConfig({ MCP_AUTH_TOKEN: "secret", MCP_EXECUTION_TRACKING: "required" }, "/tmp").executionTracking).toBe("required");
+    expect(() => loadConfig({ MCP_AUTH_TOKEN: "secret", MCP_EXECUTION_TRACKING: "requiredd" }, "/tmp")).toThrow("MCP_EXECUTION_TRACKING must be optional or required");
   });
 
   it("requires public HTTPS metadata when OAuth is enabled", () => {

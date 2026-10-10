@@ -108,6 +108,54 @@ After a service restart, any prior `prepared` or `running` receipt becomes `unkn
 is never automatically retried. ChatGPT must inspect current files/artifacts and record
 an explicit reconciliation before a `completed` task can close over that uncertainty.
 
+### Enforced tracking and compact recovery
+
+For GPT project work, set `MCP_EXECUTION_TRACKING=required` in the local deployment
+configuration. Both execution tools then reject calls without `taskId` and `operationId`
+**before spawn**. The `tracking_required` error returns a read-only `get_work_context`
+call for the requested workspace. Reuse its active task; create a checkpoint only when
+no active task exists. This continuity checkpoint is not a replacement for a project's
+existing task contract. The default `optional` policy preserves untracked clients.
+This setting applies only to `exec_command` and `run_script`: it does not deduplicate
+file edits, stdin writes, or external effects retried under a different operation ID.
+
+Process start, polling, stdin and termination responses preserve the tracked task and
+operation IDs, receipt state and persistence state in both text and structured results.
+`nextCall` supplies `read_process` with the returned `nextSeq` and a 16 KiB output limit.
+Drain `hasMore=true` even if the process has exited. After the output is drained, a
+tracked result directs the caller to work context; process completion never closes a
+task. A duplicate tracked start is explicitly marked `duplicate=true`, including when
+the existing worker is still running.
+
+`get_work_context` defaults to `format=summary` at the MCP tool boundary. It keeps task
+identity/revision, bounded intent, drift/evidence status and execution counts, without
+duplicating all file fingerprints. `summaryOmissions` describes removed details.
+Use `format=full` before detailed reconciliation; a partial summary cannot authorize
+retries or prove completion. Direct service calls retain the full view by default.
+
+`list_processes` defaults to 20 entries with no command bodies or output. Filter with
+`taskId`, exact `cwd`, or `runningOnly`; running entries sort first. `counts` includes
+all matching retained entries, and `truncated` reports omitted entries. `includeCommand=true`
+requests the previous command detail explicitly. `availableThroughSeq` reports available
+output, not output already read: continue with the previous `nextSeq`, or use `afterSeq=0`
+when recovering a lost cursor. Retained output can expire or be evicted; exit receipts
+persist separately and do not preserve stdout/stderr across a service restart.
+
+Use the [GPT project instructions template](templates/chatgpt-project-instructions.md)
+with this profile. Refresh the connector catalog after deploying schema changes and
+check that both execution tools expose tracking IDs. The server places recovery rules
+first in its initialization instructions, as described in
+[OpenAI's MCP server guidance](https://developers.openai.com/plugins/build/mcp-server).
+Neither these rules nor tracking repair ChatGPT's internal response stream or wake an
+idle existing conversation. They preserve execution facts and prevent an exact tracked
+retry from running twice when the client returns. Existing operations started without
+tracking do not acquire durable receipts retroactively.
+
+Validate with `npm run integration:docker` before activation. Deployment must use the
+existing active-process guard; do not restart a busy workmachine. Optional/required
+changes need a service deployment to take effect. This feature does not restart services
+or send browser recovery prompts by itself.
+
 The continuity store lives under `MCP_CONTINUITY_STATE_DIR` (Docker defaults to
 `MCP_STATE_DIR/continuity`) and is separate from request telemetry. Workspace snapshots
 are atomic JSON files guarded by a single writer; execution receipts are separate JSON

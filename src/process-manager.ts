@@ -15,6 +15,7 @@ export type { ProcessOutputStream } from "./process-output-buffer.js";
 
 interface ManagedProcess {
   sessionId: string;
+  tracking: ProcessTracking | undefined;
   child: ChildProcessWithoutNullStreams;
   command: string;
   cwd: string;
@@ -143,6 +144,12 @@ export interface ProcessTerminalEvent {
   errorCode: string | null;
 }
 
+export interface ProcessTracking {
+  taskId: string;
+  operationId: string;
+  workspaceId: string;
+}
+
 export interface StartProcessRequest {
   executable: string;
   args: string[];
@@ -153,6 +160,7 @@ export interface StartProcessRequest {
   stdin?: string | undefined;
   cleanup?: (() => Promise<void>) | undefined;
   sessionId?: string | undefined;
+  tracking?: ProcessTracking | undefined;
   onTerminal?: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
 }
 
@@ -164,6 +172,7 @@ export interface ReadProcessRequest {
 
 export interface ProcessReadResult {
   sessionId: string;
+  tracking?: ProcessTracking | undefined;
   command: string;
   cwd: string;
   running: boolean;
@@ -241,6 +250,7 @@ export class ProcessManager {
     } catch { /* observation must not orphan a spawned process */ }
     const managed: ManagedProcess = {
       sessionId,
+      tracking: request.tracking ? { ...request.tracking } : undefined,
       child,
       command: request.commandForDisplay,
       cwd: request.cwd,
@@ -353,6 +363,7 @@ export class ProcessManager {
 
     return {
       sessionId,
+      ...(managed.tracking ? { tracking: { ...managed.tracking } } : {}),
       command: managed.command,
       cwd: managed.cwd,
       running: this.#isRunning(managed),
@@ -481,6 +492,10 @@ export class ProcessManager {
     startedAt: string;
     endedAt: string | undefined;
     exitCode: number | null | undefined;
+    tracking?: ProcessTracking;
+    availableThroughSeq: number;
+    totalOutputBytes: number;
+    droppedOutputBytes: number;
   }> {
     return [...this.#processes.values()].map((managed) => ({
       sessionId: managed.sessionId,
@@ -494,6 +509,10 @@ export class ProcessManager {
           ? undefined
           : new Date(managed.endedAt).toISOString(),
       exitCode: managed.exitCode,
+      ...(managed.tracking ? { tracking: { ...managed.tracking } } : {}),
+      availableThroughSeq: managed.outputBuffer.latestSeq,
+      totalOutputBytes: managed.totalOutputBytes,
+      droppedOutputBytes: managed.outputBuffer.droppedBytes,
     }));
   }
 

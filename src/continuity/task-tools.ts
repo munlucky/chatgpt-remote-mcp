@@ -73,10 +73,11 @@ export function registerTaskTools(
     {
       title: "Get durable work context",
       description:
-        "Read durable task checkpoints and execution receipts, then compare them with a bounded observation of the current workspace. This tool is read-only: it never creates a task, advances a phase, resumes a task, or authorizes execution. If taskId and cwd are omitted it returns bounded active candidates and selects only when exactly one complete candidate exists.",
+        "Call before starting or resuming project work. Read durable task checkpoints and execution receipts, then compare them with current workspace state. The default summary is compact; use format=full for checkpoint details and file fingerprints. This read-only tool never creates/resumes a task or authorizes execution. Without taskId/cwd it selects only one complete active candidate; otherwise choose explicitly.",
       inputSchema: {
         cwd: z.string().min(1).optional().describe("Workspace path in the MCP execution environment. Used to select that workspace's active task."),
         taskId: z.string().uuid().optional().describe("Specific continuity task ID. When cwd is also supplied both must resolve to the same workspace."),
+        format: z.enum(["summary", "full"]).default("summary").describe("Compact recovery summary by default. full returns bounded checkpoint details, file fingerprints and execution receipts. Summary omissions are explicit; they never authorize retries or completion."),
         recentExecutionLimit: z.number().int().min(1).max(50).default(10).describe("Maximum recent terminal execution receipts returned. Unsettled executions are returned independently."),
         candidateLimit: z.number().int().min(1).max(100).default(20).describe("Maximum active workspace candidates returned when neither cwd nor taskId is supplied."),
         cursor: z.string().max(128).optional().describe("Reserved bounded-list cursor. Current v1 responses return nextCursor=null when no further page is available."),
@@ -84,8 +85,11 @@ export function registerTaskTools(
       annotations: TOOL_ANNOTATIONS.readOnlyClosed,
       _meta: authMetadata,
     },
-    async ({ cwd, taskId, recentExecutionLimit, candidateLimit }) =>
-      runTool(() => service.context({ cwd, taskId, recentExecutionLimit, candidateLimit })),
+    async ({ cwd, taskId, recentExecutionLimit, candidateLimit, format }) =>
+      runTool(async () => ({
+        ...await service.context({ cwd, taskId, recentExecutionLimit, candidateLimit, format }),
+        executionTracking: config.executionTracking,
+      })),
   );
 
   if (!onlyTool || onlyTool === "checkpoint_work") server.registerTool(

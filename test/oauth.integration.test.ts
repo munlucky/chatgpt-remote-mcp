@@ -13,6 +13,14 @@ import { loadConfig, type AppConfig } from "../src/config.js";
 import { startHttpServer, type RunningHttpServer } from "../src/http-server.js";
 import { createServices } from "../src/mcp-server.js";
 
+// This fixture deliberately restarts the listener on the same port. Do not
+// reuse a pooled socket from the listener which was just closed.
+function fetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("connection", "close");
+  return globalThis.fetch(input, { ...init, headers });
+}
+
 async function reservePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -242,7 +250,7 @@ describe("OAuth 2.1 MCP authorization", () => {
 
     const client = new Client({ name: "oauth-integration-test", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(resourceUrl), {
-      requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } },
+      requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}`, connection: "close" } },
     });
     await client.connect(transport);
     try {
