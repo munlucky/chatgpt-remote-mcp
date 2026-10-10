@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadConfig } from "../src/config.js";
 import { startHttpServer, type RunningHttpServer } from "../src/http-server.js";
@@ -80,6 +80,7 @@ describe.sequential("GPT work recovery over stateless HTTP", () => {
   });
 
   it("keeps a tracked worker after its HTTP reply is lost and recovers without running it twice", async () => {
+    const terminalWrites = vi.spyOn(services.executionRecorder, "markTerminal");
     const firstClient = await connect();
     const taskId = await createTask(firstClient);
     const operationId = randomUUID();
@@ -120,6 +121,9 @@ describe.sequential("GPT work recovery over stateless HTTP", () => {
     expect(services.processManager.list()).toHaveLength(1);
     const sessionId = String(data(status).processes[0].sessionId);
     await services.processManager.waitForExit(sessionId, 4000);
+    expect(await Promise.allSettled(terminalWrites.mock.results.map((entry) => entry.value))).toEqual([
+      expect.objectContaining({ status: "fulfilled" }),
+    ]);
     const completed = await resumed.callTool({ name: "read_process", arguments: { sessionId, afterSeq: 0, maxOutputBytes: 16 * 1024 } });
     expect(data(completed)).toMatchObject({ taskId, operationId, completed: true, executionState: "exited", persistenceState: "ok", exitCode: 0, nextCall: { tool: "get_work_context", arguments: { taskId } } });
     expect(header(completed)).toMatchObject({ taskId, operationId, executionState: "exited" });

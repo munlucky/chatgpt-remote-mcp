@@ -190,10 +190,6 @@ export class TaskContinuityService {
         );
       }
 
-      for (const reconciliation of normalizedCheckpoint.executionReconciliations ?? []) {
-        await this.executionRecorder.reconcile(identity.workspaceId, task.taskId, reconciliation);
-      }
-
       const now = new Date().toISOString();
       task.revision += 1;
       task.updatedAt = now;
@@ -215,7 +211,8 @@ export class TaskContinuityService {
         result,
         now,
       );
-      await this.store.writeWorkspace(state);
+      await this.executionRecorder.withReconciliations(identity.workspaceId, task.taskId,
+        normalizedCheckpoint.executionReconciliations ?? [], (records) => this.store.commitWorkspace(state, records));
       return result;
     });
   }
@@ -417,6 +414,7 @@ export class TaskContinuityService {
         summary: task.summary,
         checkpoint: task.checkpoint,
         lastObservedWorkspace: task.lastObservedWorkspace,
+        legacy: task.legacy,
       },
       observation: current,
       drift: comparison.drift,

@@ -192,6 +192,32 @@ export class ExecutionRecorder {
     });
   }
 
+  async withReconciliations<T>(workspaceId: string, taskId: string,
+    reconciliations: NonNullable<ExecutionRecord["callerResolution"]>[],
+    commit: (records: ExecutionRecord[]) => Promise<T>): Promise<T> {
+    const ids = reconciliations.map((entry) => entry.operationId);
+    if (new Set(ids).size !== ids.length) throw new McpToolError("idempotency_conflict", "Duplicate execution reconciliation");
+    const records: ExecutionRecord[] = [];
+    const ordered = [...reconciliations].sort((a, b) => a.operationId.localeCompare(b.operationId));
+    const lockNext = async (index: number): Promise<T> => {
+      if (index === ordered.length) return commit(records);
+      const reconciliation = ordered[index]!;
+      return this.store.withExecutionLock(reconciliation.operationId, async () => {
+        const current = await this.require(workspaceId, reconciliation.operationId);
+        if (current.taskId !== taskId) throw new McpToolError("workspace_mismatch", "Execution does not belong to the selected task");
+        if (current.state !== "unknown") throw new McpToolError("idempotency_conflict", "Only unknown executions can be reconciled");
+        if (current.callerResolution) {
+          const { recordedAt: _previousTime, ...previous } = current.callerResolution;
+          const { recordedAt: _newTime, ...requested } = reconciliation;
+          if (JSON.stringify(previous) !== JSON.stringify(requested)) throw new McpToolError("idempotency_conflict", "Execution already has a different caller resolution");
+        }
+        records.push(current.callerResolution ? current : { ...current, callerResolution: reconciliation });
+        return lockNext(index + 1);
+      });
+    };
+    return lockNext(0);
+  }
+
   private async require(workspaceId: string, operationId: string): Promise<ExecutionRecord> {
     const current = await this.store.readExecution(workspaceId, operationId);
     if (!current) {

@@ -36,3 +36,12 @@ docs/runtime/
 coverage/
 .*-oauth-state.json
 docs
+
+# Canonical MCP improvement plan; runtime evidence stays excluded.
+!/docs/
+/docs/*
+!/docs/plans/
+/docs/plans/*
+!/docs/plans/mcp-improvements-2026-10-10/
+!/docs/plans/mcp-improvements-2026-10-10/*.md
+!/docs/plans/mcp-improvements-2026-10-10/BACKLOG.json

@@ -1,4 +1,5 @@
-export const CONTINUITY_SCHEMA_VERSION = 1 as const;
+export const CONTINUITY_SCHEMA_VERSION = 2 as const;
+export const INSTALLATION_SCHEMA_VERSION = 1 as const;
 
 export type TaskStatus = "active" | "completed" | "abandoned";
 export type ExecutionState = "prepared" | "running" | "exited" | "spawn_failed" | "unknown";
@@ -81,6 +82,11 @@ export interface TaskRecord {
   summary?: string | undefined;
   checkpoint: WorkCheckpoint;
   lastObservedWorkspace: WorkspaceObservation;
+  legacy?: {
+    fromSchemaVersion: 1;
+    checkpointClaims: "caller_claim";
+    completionClaim: "caller_claim" | null;
+  };
 }
 
 export interface MutationDedupeRecord {

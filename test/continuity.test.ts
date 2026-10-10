@@ -164,6 +164,7 @@ describe.sequential("durable task continuity", () => {
         MCP_AUTH_TOKEN: "continuity-test",
         MCP_DEFAULT_CWD: root,
         MCP_CONTINUITY_STATE_DIR: path.join(root, "state"),
+        MCP_DEFAULT_SHELL: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/bash",
       },
       root,
     );
