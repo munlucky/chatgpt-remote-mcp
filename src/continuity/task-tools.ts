@@ -60,6 +60,9 @@ const checkpointInputSchema = z.discriminatedUnion("mode", [
   }),
 ]);
 
+const finalCheckpointSchema = checkpointSchema.omit({ evidenceRefs: true, executionReconciliations: true })
+  .extend({ current: z.string().max(2048) }).strict();
+
 export function registerTaskTools(
   server: McpServer,
   config: AppConfig,
@@ -114,13 +117,14 @@ export function registerTaskTools(
     {
       title: "Complete or abandon durable work",
       description:
-        "Record a terminal task outcome and atomically clear the workspace active pointer. completed is rejected while tracked executions remain running, prepared, or unresolved unknown. abandoned records an explicit stop but never terminates OS processes implicitly.",
+        "Atomically save the terminal checkpoint/outcome and clear the active pointer. completed requires phase=completed, nonblank current, empty remaining/blockers, supplied through finalCheckpoint or a prior checkpoint_work (behavior change). Running/prepared/unresolved unknown executions still block completion. Reconcile through checkpoint_work first. abandoned preserves remaining/blockers and never terminates OS processes. Structural validity is not proof of project completion.",
       inputSchema: {
         taskId: z.string().uuid().describe("Existing active continuity task ID."),
         requestId: z.string().uuid().describe("Idempotency key reused only when retrying this exact terminal mutation."),
         expectedRevision: z.number().int().min(1).describe("Current task revision. Stale revisions fail instead of auto-merging."),
         outcome: z.enum(["completed", "abandoned"]).describe("Terminal outcome explicitly chosen by ChatGPT."),
         summary: z.string().max(8192).describe("Bounded completion or abandonment summary; do not store prompts, command bodies, or secrets."),
+        finalCheckpoint: finalCheckpointSchema.optional().describe("Optional terminal checkpoint. evidenceRefs belong only at top level; reconcile executions using checkpoint_work first."),
         evidenceRefs: z.array(evidenceRefSchema).max(100).default([]).describe("Receipts or artifact hashes supporting the terminal decision."),
       },
       annotations: TOOL_ANNOTATIONS.destructiveIdempotentClosed,

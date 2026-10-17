@@ -320,9 +320,12 @@ describe.sequential("durable task continuity", () => {
         expectedRevision: 2,
         outcome: "completed",
         summary: "explicitly reconciled",
+        finalCheckpoint: { phase: "completed", completed: ["reconciled"], current: "verified", remaining: [], blockers: [], changedPaths: [] },
         evidenceRefs: [],
       }),
     ).resolves.toMatchObject({ status: "completed", revision: 3 });
+    expect((await secondServices.continuityService.context({ taskId, format: "full" })).task)
+      .toMatchObject({ checkpoint: { executionReconciliations: [expect.objectContaining({ operationId })] } });
   });
 
   it("keeps all unsettled counts when a compact recovery summary omits receipt details", async () => {

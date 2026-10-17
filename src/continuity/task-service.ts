@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { McpToolError } from "../errors.js";
 import { summarizeContext } from "./context-summary.js";
+import { completionCheckpointConflict, type FinalCheckpoint } from "./completion-checkpoint.js";
 import type { ExecutionRecorder } from "./execution-recorder.js";
 import type { TaskStore } from "./task-store.js";
 import type {
@@ -224,6 +225,7 @@ export class TaskContinuityService {
     outcome: "completed" | "abandoned";
     summary: string;
     evidenceRefs: EvidenceRef[];
+    finalCheckpoint?: FinalCheckpoint | undefined;
   }): Promise<Record<string, unknown>> {
     await this.initialize();
     const selected = await this.requireTask(input.taskId);
@@ -235,6 +237,7 @@ export class TaskContinuityService {
       outcome: input.outcome,
       summary: input.summary,
       evidenceRefs: input.evidenceRefs,
+      ...(input.finalCheckpoint !== undefined ? { finalCheckpoint: input.finalCheckpoint } : {}),
     });
 
     return this.store.withWorkspaceLock(identity.workspaceId, async () => {
@@ -265,16 +268,34 @@ export class TaskContinuityService {
         );
       }
 
+      const candidate = input.finalCheckpoint ?? task.checkpoint;
+      if (input.outcome === "completed" && completionCheckpointConflict(candidate)) {
+        throw new McpToolError("completion_checkpoint_conflict", "Inspect get_work_context and supply a completed finalCheckpoint", {
+          remainingCount: Math.min(candidate.remaining.length, 100),
+          blockerCount: Math.min(candidate.blockers.length, 100),
+          nextCall: { tool: "get_work_context", arguments: { taskId: task.taskId, format: "full" } },
+        });
+      }
+      if (input.finalCheckpoint && (candidate.current.length > 2048
+        || "evidenceRefs" in input.finalCheckpoint || "executionReconciliations" in input.finalCheckpoint)) {
+        throw new McpToolError("completion_checkpoint_conflict", "Invalid terminal checkpoint fields or current length");
+      }
+      const finalCheckpoint: WorkCheckpoint = {
+        ...candidate,
+        phase: input.outcome,
+        evidenceRefs: input.evidenceRefs,
+        ...(task.checkpoint.executionReconciliations
+          ? { executionReconciliations: task.checkpoint.executionReconciliations } : {}),
+      };
+      this.validateCheckpoint(finalCheckpoint);
+
       const now = new Date().toISOString();
       task.status = input.outcome;
       task.revision += 1;
       task.updatedAt = now;
       task.completedAt = now;
       task.summary = input.summary;
-      task.checkpoint = {
-        ...task.checkpoint,
-        evidenceRefs: input.evidenceRefs,
-      };
+      task.checkpoint = finalCheckpoint;
       state.workspaceRevision += 1;
       state.activeTaskId = null;
       const result: Record<string, unknown> = {
@@ -402,6 +423,8 @@ export class TaskContinuityService {
 
     const response: Record<string, unknown> = {
       selection: "selected",
+      warnings: task.status === "completed" && completionCheckpointConflict(task.checkpoint)
+        ? ["completion_checkpoint_conflict"] : [],
       workspace: state.workspace,
       task: {
         taskId: task.taskId,

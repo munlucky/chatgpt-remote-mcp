@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { errorMessage, McpToolError } from "./errors.js";
+import { errorMessage, McpToolError, safeErrorCode } from "./errors.js";
 import { requestMetrics } from "./telemetry.js";
 
 export interface SuccessResultFormatter {
@@ -50,6 +50,7 @@ export async function runTool(
     if (metrics) {
       metrics.toolError = true;
       const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+      metrics.errorCode = safeErrorCode(code);
       metrics.errorCategory = code === "ENOENT" ? "file_missing"
         : code === "EACCES" || code === "EPERM" ? "permission_denied" : "tool_failure";
     }

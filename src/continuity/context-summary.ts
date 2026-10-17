@@ -91,6 +91,7 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
       executions: { total: executions.total ?? 0, counts: (summary.executions as Record<string, unknown>).counts },
       drift: context.drift,
       evidence: context.evidence,
+      warnings: context.warnings,
       resume: "inspection_required",
       summaryOmissions: { ...omitted, sizeLimit: 1 },
       recovery: summary.recovery,

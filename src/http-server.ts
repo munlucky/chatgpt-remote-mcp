@@ -3,6 +3,7 @@ import type { Server as HttpServer } from "node:http";
 import { monitorEventLoopDelay, performance as nodePerformance } from "node:perf_hooks";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import {
   createOAuthMetadata,
   mcpAuthRouter,
@@ -122,7 +123,15 @@ export async function startHttpServer(
           setupMs: metrics.setupMs,
           toolMs: metrics.toolMs,
           toolError: metrics.toolError,
+          protocolHeader: request.get("mcp-protocol-version") === undefined ? "omitted"
+            : SUPPORTED_PROTOCOL_VERSIONS.includes(request.get("mcp-protocol-version")!) ? "supported" : "unsupported",
+          ...(SUPPORTED_PROTOCOL_VERSIONS.includes(request.get("mcp-protocol-version") ?? "")
+            ? { protocolVersion: request.get("mcp-protocol-version")! } : {}),
+          ...(rpcMethod(request.body) === "initialize" ? { initializeProtocol: request.body?.params?.protocolVersion === undefined
+            ? "omitted" as const : SUPPORTED_PROTOCOL_VERSIONS.includes(request.body.params.protocolVersion)
+              ? "supported" as const : "unsupported" as const } : {}),
           ...(metrics.errorCategory ? { errorCategory: metrics.errorCategory } : {}),
+          ...(metrics.errorCode ? { errorCode: metrics.errorCode } : {}),
           responseBytes: outcome === "completed" ? responseBytes : null,
         };
       if (config.usageConsoleLog) console.log(JSON.stringify(event));
@@ -269,8 +278,9 @@ export async function startHttpServer(
     response.once("finish", () => void closeRequest());
     response.once("close", () => void closeRequest());
     try {
-      transport.onerror = (error) => {
-        console.error("MCP transport error:", errorMessage(error));
+      transport.onerror = () => {
+        // SDK errors can echo untrusted version headers. Observe bounded metadata instead.
+        console.error("MCP transport error");
       };
       await server.connect(transport);
       const metrics = requestMetrics.getStore();

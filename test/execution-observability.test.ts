@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,44 @@ import { createServices } from "../src/mcp-server.js";
 import { startHttpServer } from "../src/http-server.js";
 
 describe("request-independent execution observation", () => {
+  it("joins tracked exec and run start/terminal/receipts using one boot and independent service boots", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mcp-joined-boot-"));
+    const config = loadConfig({ MCP_AUTH_TOKEN: "private-auth", MCP_DEFAULT_CWD: root,
+      MCP_CONTINUITY_STATE_DIR: path.join(root, "state"), MCP_USAGE_LOG_DIR: path.join(root, "usage") }, root);
+    config.host = "127.0.0.1"; config.port = 0;
+    const services = createServices(config), other = createServices(config);
+    expect(other.continuityService.store.bootId).not.toBe(services.continuityService.store.bootId);
+    const server = await startHttpServer(config, services);
+    try {
+      const created = await services.continuityService.create({ cwd: root, requestId: randomUUID(), objective: "synthetic",
+        checkpoint: { phase: "verify", completed: [], current: "verify", remaining: [], blockers: [], evidenceRefs: [], changedPaths: [] } });
+      const endpoint = `http://127.0.0.1:${(server.httpServer.address() as AddressInfo).port}/mcp`;
+      for (const name of ["exec_command", "run_script"] as const) {
+        for (const timeoutMs of [0, 100]) {
+        const response = await fetch(endpoint, { method: "POST", headers: { authorization: "Bearer private-auth", "content-type": "application/json", accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {
+            ...(name === "exec_command" ? { cmd: timeoutMs ? "node -e 'setTimeout(()=>{},1000)'" : "node -e 'process.exit(0)'" }
+              : { runtime: "node", workdir: root, script: timeoutMs ? "setTimeout(()=>{},1000)" : "process.exit(0)" }),
+            cwd: root, taskId: created.taskId, operationId: randomUUID(), yieldTimeMs: 3000, timeoutMs,
+          } } }) });
+        expect((await response.json()).result.isError).not.toBe(true);
+        }
+      }
+      await services.usageLog.flush();
+      const events = (await readFile(path.join(root, "usage", "requests.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      const context = await services.continuityService.context({ taskId: String(created.taskId), format: "full" });
+      const receipts = (context.executions as { recent: Record<string, unknown>[] }).recent;
+      expect(receipts).toHaveLength(4);
+      for (const receipt of receipts) {
+        const lifecycle = events.filter(e => e.sessionId === receipt.sessionId);
+        expect(lifecycle.map(e => e.event).sort()).toEqual(["process_started", "process_terminal"]);
+        for (const event of lifecycle) expect(event.bootId).toBe(receipt.bootId);
+        expect(lifecycle[0].timeoutMs).toBe(lifecycle[1].timeoutMs);
+        expect(lifecycle[0].timeoutMs).toBe(receipt.timedOut ? 100 : 0);
+        expect(receipt).not.toHaveProperty("timeoutMs");
+      }
+    } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+  });
   it("records a failed process after its HTTP response ends, without polling or sensitive payloads", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-execution-log-"));
     const config = loadConfig({ MCP_AUTH_TOKEN: "private-auth", MCP_DEFAULT_CWD: dir, MCP_USAGE_LOG_DIR: path.join(dir, "usage") });

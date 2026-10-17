@@ -55,9 +55,11 @@ if (helper.enabled) {
   runtimeHelperVerified = true;
 }
 
-const result = JSON.parse(execFileSync('docker', ['exec', container, 'node', '/opt/chatgpt-remote-mcp/scripts/live-probe.mjs'], { encoding: 'utf8' }));
+const result = JSON.parse(execFileSync('docker', ['exec', container, 'node', '/opt/chatgpt-remote-mcp/scripts/live-probe.mjs', '--terminal-smoke'], { encoding: 'utf8' }));
 if (
   result.buildId !== buildId ||
+  !result.finalCheckpointAdvertised || !result.negotiatedProtocolVersion || !result.serverCatalogVerified ||
+  !result.terminalSmokeVerified ||
   !result.telemetry.enabled ||
   result.telemetry.writeFailures ||
   result.telemetry.droppedEvents

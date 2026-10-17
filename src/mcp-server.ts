@@ -1,5 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { randomUUID } from "node:crypto";
 
 import { createBatchReadRegistrar } from "./batch-read.js";
 import type { AppConfig } from "./config.js";
@@ -26,7 +25,12 @@ export interface McpServices {
 
 export function createServices(config: AppConfig): McpServices {
   const usageLog = new UsageLog(config.usageLogDir, config.usageLogMaxBytes, config.usageLogFiles);
-  const bootId = randomUUID();
+  const taskStore = new TaskStore({
+    stateDirectory: config.continuityStateDir,
+    maxSnapshotBytes: config.continuityMaxSnapshotBytes,
+    maxTotalBytes: config.continuityMaxTotalBytes,
+  });
+  const bootId = taskStore.bootId;
   const processManager = new ProcessManager({
     observeTerminal: (process) => {
       const metrics = requestMetrics.getStore();
@@ -64,11 +68,6 @@ export function createServices(config: AppConfig): McpServices {
     maxChunkBytes: config.maxFileChunkBytes,
     maxEditFileBytes: config.maxEditFileBytes,
     maxOutputBytes: config.maxOutputBytes,
-  });
-  const taskStore = new TaskStore({
-    stateDirectory: config.continuityStateDir,
-    maxSnapshotBytes: config.continuityMaxSnapshotBytes,
-    maxTotalBytes: config.continuityMaxTotalBytes,
   });
   const workspaceIdentity = new WorkspaceIdentityService(
     () => taskStore.installationId,

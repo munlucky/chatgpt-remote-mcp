@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { safeErrorCode } from "./errors.js";
 
 export interface RequestMetrics {
   clientClass?: "codex" | "openai_mcp" | "other";
@@ -8,6 +9,7 @@ export interface RequestMetrics {
   trafficClass?: "probe" | "usage";
   toolName?: string | null;
   errorCategory?: "file_missing" | "permission_denied" | "tool_failure";
+  errorCode?: string;
   setupMs: number | null;
   toolMs: number | null;
   toolError: boolean | null;
@@ -38,6 +40,10 @@ export interface UsageEvent {
   responseBytes: number | null;
   trafficClass?: "probe" | "usage";
   errorCategory?: RequestMetrics["errorCategory"];
+  errorCode?: string;
+  protocolHeader?: "supported" | "unsupported" | "omitted";
+  protocolVersion?: string;
+  initializeProtocol?: "supported" | "unsupported" | "omitted";
   clientClass?: RequestMetrics["clientClass"];
 }
 
@@ -56,6 +62,7 @@ export interface ProcessUsageEvent {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  timeoutMs?: number;
   spawnFailed: boolean;
   totalOutputBytes: number;
   errorCode: string | null;
@@ -72,6 +79,7 @@ export interface ProcessStartedEvent {
   toolName: "exec_command" | "run_script";
   sessionId: string;
   startedAt: string;
+  timeoutMs?: number;
 }
 
 const MAX_PENDING_EVENTS = 1000;
@@ -109,7 +117,9 @@ export class UsageLog {
       return;
     }
 
-    const line = `${JSON.stringify(event)}\n`;
+    const line = `${JSON.stringify({ ...event,
+      ...("errorCode" in event && event.errorCode != null ? { errorCode: safeErrorCode(event.errorCode) } : {}),
+    })}\n`;
     this.#buffer.push(line);
     this.#bufferBytes += Buffer.byteLength(line);
     this.#pending++;

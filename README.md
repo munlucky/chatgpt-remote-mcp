@@ -62,6 +62,15 @@ separate between external clients.
 
 The MCP server publishes 24 tools, including bounded `read_files` batching and three
 durable continuity tools: `get_work_context`, `checkpoint_work`, and `complete_work`.
+
+`complete_work` accepts an optional `finalCheckpoint` (current: at most 2,048 characters).
+Completion now requires phase `completed`, a nonblank current, and empty remaining/blockers.
+Older clients must save that checkpoint through `checkpoint_work` first. Otherwise the call
+returns `completion_checkpoint_conflict` without changing state. Final checkpoint and terminal
+state use the existing atomic schema-v2 write. Evidence belongs at the top level; execution
+reconciliation must precede completion. Existing identical request IDs replay their original
+result; adding a final checkpoint changes the request. Legacy inconsistent records are read
+with a warning, without rewriting them. This structural check does not certify project completion.
 Existing filesystem and process tools remain available. The container has full access
 to configured mounts; protect credentials and select mounts deliberately.
 

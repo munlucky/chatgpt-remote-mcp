@@ -8,6 +8,8 @@
 
 ## 바로 사용할 문서
 
+- [10월 16일 운영 개선 계획](OPERATIONS-2026-10-16.md): 최근 72시간 로그에 근거한 완료 기록, 오류 진단, 시간 초과, 프로토콜 개선 범위와 수용 기준.
+- [운영 개선 실행 상태](OPERATIONS-2026-10-16-STATUS.md): W0~W5와 호스트 조사 진행표. 구현·배포·서버 검증 통과, 실제 클라이언트·24시간 효과 별도 미검증.
 - [전체 상세 목록](BACKLOG.md): 문제, 변경 범위, 선행 작업, 완료 기준.
 - [기계 판독 목록](BACKLOG.json): 32개 ID, 의존성, 상태, 근거, 파일과 수용 기준.
 - [공통 계약](CONTRACTS.md): 단계 전이, 검증, 변경 중복 방지, 응답 예산, 완료 권한.
@@ -66,4 +68,3 @@ P0는 오래된 단계 복원, 중복 변경, 잘못된 완료 판정을 막는�
 브라우저 반복 감시의 대체 후보는 MCP Events다. 지원 surface와 SDK 호환성 검증을 먼저 수행한다. 일반 ChatGPT 대화의 끊긴 stream을 복구한다는 전제는 두지 않는다. [공식 MCP Events 문서](https://developers.openai.com/plugins/build/mcp-events)를 기준으로 MCP-29~31을 준비했다.
 
 기존 `chrome-mcp`, `mcp-2` 자동화는 PAUSED 상태를 유지한다. 이 준비 작업에서는 자동화, consumer 작업, Docker, Git commit/push를 변경하지 않았다.
-

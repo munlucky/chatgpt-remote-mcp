@@ -23,7 +23,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { errorMessage } from "./errors.js";
+import { errorMessage, McpToolError } from "./errors.js";
 import { expandPath } from "./paths.js";
 
 const execFileAsync = promisify(execFile);
@@ -440,7 +440,7 @@ export class FileService {
     const occurrences = original.split(oldText).length - 1;
     const expected = expectedOccurrences ?? (replaceAll ? occurrences : 1);
     if (occurrences !== expected) {
-      throw new Error(
+      throw new McpToolError("replacement_mismatch",
         `Expected ${expected} occurrence(s) of oldText in ${resolvedPath}, found ${occurrences}`,
       );
     }
@@ -476,12 +476,14 @@ export class FileService {
       baseArguments.push("--3way");
     }
     const checkArguments = [...baseArguments, "--check", patchPath];
+    let checkedSuccessfully = false;
     try {
       const checked = await execFileAsync("git", checkArguments, {
         cwd: resolvedCwd,
         encoding: "utf8",
         maxBuffer: this.#options.maxOutputBytes,
       });
+      checkedSuccessfully = true;
       if (options.checkOnly) {
         return {
           cwd: resolvedCwd,
@@ -505,7 +507,7 @@ export class FileService {
       };
     } catch (error) {
       const execError = error as Error & { stdout?: string; stderr?: string };
-      throw new Error(
+      throw new McpToolError(checkedSuccessfully ? "patch_apply_failed" : "patch_check_failed",
         [errorMessage(execError), execError.stdout, execError.stderr]
           .filter(Boolean)
           .join("\n"),

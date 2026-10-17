@@ -40,7 +40,7 @@ describe.sequential("continuity storage integrity", () => {
       MCP_CONTINUITY_STATE_DIR: path.join(root, "state") }, root));
     services.push(service);
     const created = await service.continuityService.create({ cwd: root, requestId: randomUUID(), objective: "preserve identifiers",
-      checkpoint: { phase: "verify", completed: ["caller says test passed"], current: "inspect", remaining: [], changedPaths: [], evidenceRefs: [], blockers: [] } });
+      checkpoint: { phase: "completed", completed: ["caller says test passed"], current: "inspect", remaining: [], changedPaths: [], evidenceRefs: [], blockers: [] } });
     const identity = await service.continuityService.workspaceIdentity.resolve(root);
     const prepared = await service.executionRecorder.prepare({ cwd: root, taskId: String(created.taskId), operationId: randomUUID(),
       toolKind: "run_script", semanticInput: { script: "private source must not be persisted" } });
@@ -505,11 +505,15 @@ describe.sequential("continuity storage integrity", () => {
     });
     const createInput = { cwd: f.root, requestId, objective: "durable create", checkpoint: f.state.tasks[f.taskId].checkpoint };
     const completeInput = { taskId: f.taskId, requestId, expectedRevision: 1,
-      outcome: "completed" as const, summary: "durable completion", evidenceRefs: [] };
+      outcome: "completed" as const, summary: "durable completion", evidenceRefs: [],
+      finalCheckpoint: { phase: "completed", current: "final verified state", remaining: [], blockers: [], completed: ["verified"], changedPaths: [] } };
     const mutate = () => kind === "create" ? service.continuityService.create(createInput) : service.continuityService.complete(completeInput);
     await expect(mutate()).rejects.toThrow("snapshot sync failed");
     const visible = JSON.parse(await readFile(f.stateFile, "utf8"));
     expect(visible.mutationDedupe[requestId]).toBeDefined();
+    if (kind === "complete") expect(visible).toMatchObject({ activeTaskId: null, tasks: {
+      [f.taskId]: { status: "completed", revision: 2, checkpoint: completeInput.finalCheckpoint },
+    } });
     await expect(mutate()).rejects.toThrow("snapshot sync failed");
     // Losing the in-memory failure state must not make the dedupe result usable.
     await service.continuityService.close();

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isAscii } from "node:buffer";
 
-import { errorMessage } from "./errors.js";
+import { errorMessage, McpToolError } from "./errors.js";
 import {
   IndexedProcessOutputBuffer,
   type ProcessOutputStream,
@@ -25,6 +25,7 @@ interface ManagedProcess {
   signal: NodeJS.Signals | null | undefined;
   error: string | undefined;
   timedOut: boolean;
+  timeoutMs: number;
   spawnFailed: boolean;
   onTerminal: ((event: ProcessTerminalEvent) => Promise<void> | void) | undefined;
   terminalObserver: ((event: ProcessTerminalEvent) => void) | undefined;
@@ -139,6 +140,7 @@ export interface ProcessTerminalEvent {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  timeoutMs: number;
   spawnFailed: boolean;
   totalOutputBytes: number;
   errorCode: string | null;
@@ -194,7 +196,7 @@ export interface ProcessReadResult {
 }
 
 export interface ProcessManagerOptions {
-  observeTerminal?: (process: { sessionId: string; startedAt: string }) => ((event: ProcessTerminalEvent) => void) | undefined;
+  observeTerminal?: (process: { sessionId: string; startedAt: string; timeoutMs: number }) => ((event: ProcessTerminalEvent) => void) | undefined;
   maxRetainedOutputBytes: number;
   maxTotalRetainedOutputBytes: number;
   processRetentionMs: number;
@@ -246,7 +248,7 @@ export class ProcessManager {
     });
     let terminalObserver: ManagedProcess["terminalObserver"];
     try {
-      terminalObserver = this.#options.observeTerminal?.({ sessionId, startedAt: new Date(startedAt).toISOString() });
+      terminalObserver = this.#options.observeTerminal?.({ sessionId, startedAt: new Date(startedAt).toISOString(), timeoutMs: request.timeoutMs ?? 0 });
     } catch { /* observation must not orphan a spawned process */ }
     const managed: ManagedProcess = {
       sessionId,
@@ -260,6 +262,7 @@ export class ProcessManager {
       signal: undefined,
       error: undefined,
       timedOut: false,
+      timeoutMs: request.timeoutMs ?? 0,
       spawnFailed: false,
       onTerminal: request.onTerminal,
       terminalObserver,
@@ -576,7 +579,7 @@ export class ProcessManager {
   #require(sessionId: string): ManagedProcess {
     const managed = this.#processes.get(sessionId);
     if (!managed) {
-      throw new Error(`Unknown process session: ${sessionId}`);
+      throw new McpToolError("process_session_unknown", `Unknown process session: ${sessionId}`);
     }
     return managed;
   }
@@ -703,6 +706,7 @@ export class ProcessManager {
         exitCode: managed.exitCode ?? null,
         signal: managed.signal ?? null,
         timedOut: managed.timedOut,
+        timeoutMs: managed.timeoutMs,
         spawnFailed: managed.spawnFailed,
         totalOutputBytes: managed.totalOutputBytes,
         errorCode: managed.spawnFailed

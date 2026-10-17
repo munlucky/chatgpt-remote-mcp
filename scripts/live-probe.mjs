@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
+import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
+import { verifyContinuitySmoke } from './continuity-smoke.mjs';
 const base = 'http://127.0.0.1:3000';
 const publicBase = process.env.MCP_PUBLIC_URL;
 const probeCwd = process.env.MCP_PROBE_CWD || '/opt/chatgpt-remote-mcp';
@@ -18,9 +20,24 @@ const auth = await checked(await request(`${base}/authorize`, {method:'POST',hea
 const code = new URL(auth.headers.get('location')).searchParams.get('code');
 const tokens = await (await checked(await request(`${base}/token`, {method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,code,code_verifier:verifier,redirect_uri:redirect,resource})}),200)).json();
 let id = 0;
+const negotiatedVersions = new Map();
+async function negotiate(origin) {
+  if (negotiatedVersions.has(origin)) return negotiatedVersions.get(origin);
+  const response = await checked(await request(`${origin}/mcp`, { method: 'POST', headers: {
+    'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${tokens.access_token}`,
+    'x-mcp-probe-secret': process.env.MCP_PROBE_SECRET || '',
+  }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'initialize', params: {
+    protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: clientName, version: '1' },
+  } }) }), 200);
+  const version = (await response.json()).result?.protocolVersion;
+  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(version)) throw new Error('Probe negotiated unsupported protocol');
+  negotiatedVersions.set(origin, version);
+  return version;
+}
 const call = async (name,args={},origin=base, trusted=true) => {
+  const protocolVersion = await negotiate(origin);
   const started=performance.now();
-  const response=await checked(await request(`${origin}/mcp`,{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:`Bearer ${tokens.access_token}`,'x-mcp-probe':'1','x-mcp-probe-secret':trusted ? process.env.MCP_PROBE_SECRET || '' : ''},body:JSON.stringify({jsonrpc:'2.0',id:++id,method:'tools/call',params:{name,arguments:args}})}),200);
+  const response=await checked(await request(`${origin}/mcp`,{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:`Bearer ${tokens.access_token}`,'mcp-protocol-version':protocolVersion,'x-mcp-probe':'1','x-mcp-probe-secret':trusted ? process.env.MCP_PROBE_SECRET || '' : ''},body:JSON.stringify({jsonrpc:'2.0',id:++id,method:'tools/call',params:{name,arguments:args}})}),200);
   const text=await response.text();const body=JSON.parse(text);
   if(body.error || body.result?.isError) throw new Error(`Probe tool failed: ${name}`);
   return {ms:performance.now()-started,bytes:Buffer.byteLength(text),data:body.result.structuredContent,requestId:response.headers.get('x-request-id')};
@@ -28,9 +45,10 @@ const call = async (name,args={},origin=base, trusted=true) => {
 try {
   let catalogEvidence = {};
   if (!preflight) {
+  const protocolVersion = await negotiate(publicBase);
   const catalogResponse = await checked(await request(`${publicBase}/mcp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${tokens.access_token}`, 'x-mcp-probe-secret': process.env.MCP_PROBE_SECRET || '' },
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${tokens.access_token}`, 'mcp-protocol-version': protocolVersion, 'x-mcp-probe-secret': process.env.MCP_PROBE_SECRET || '' },
     body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/list', params: {} }),
   }), 200);
   const catalog = (await catalogResponse.json()).result?.tools;
@@ -42,7 +60,12 @@ try {
     const properties = catalog.find(tool => tool.name === name)?.inputSchema?.properties;
     if (!properties?.taskId || !properties?.operationId) throw new Error(`Execution tracking fields not advertised: ${name}`);
   }
-  catalogEvidence = { publicToolCount: catalog.length, continuityToolsAdvertised: true, executionTrackingAdvertised: true, toolCatalogDigest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex') };
+  const terminalSchema = catalog.find(tool => tool.name === 'complete_work')?.inputSchema?.properties?.finalCheckpoint;
+  if (!terminalSchema?.properties?.current || terminalSchema.properties.current.maxLength !== 2048
+    || terminalSchema.properties.evidenceRefs || terminalSchema.properties.executionReconciliations) throw new Error('Terminal checkpoint schema is incomplete');
+  catalogEvidence = { publicToolCount: catalog.length, continuityToolsAdvertised: true, executionTrackingAdvertised: true,
+    finalCheckpointAdvertised: true, negotiatedProtocolVersion: protocolVersion, serverCatalogVerified: true,
+    realClientVerified: false, toolCatalogDigest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex') };
   }
   const processes=await call('list_processes');
   const entries = processes.data.processes;
@@ -50,6 +73,8 @@ try {
   const active = entries.filter(p=>p.running).length;
   if(preflight){ console.log(JSON.stringify({preflight:true,activeManagedProcesses:active})); if(active)process.exitCode=2; }
   else {
+    if (active && process.argv.includes('--terminal-smoke')) throw new Error('Active jobs prevent terminal smoke');
+    const smokeEvidence = process.argv.includes('--terminal-smoke') ? await verifyContinuitySmoke(call) : {};
     const health=await (await checked(await request(`${publicBase}/health`),200)).json();
     if(JSON.stringify(health)!==JSON.stringify({status:'ok'}))throw new Error('Public health contains unexpected fields');
     if(tokens.expires_in!==3600)throw new Error('New OAuth access token TTL is not one hour');
@@ -71,7 +96,7 @@ try {
     }
     if(!classificationVerified)throw new Error('Live probe classification evidence missing');
     const p=(a,q)=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*q)-1];
-    console.log(JSON.stringify({...catalogEvidence,classificationVerified,publicHealthMinimal:true,diagnosticsProtected:true,healthy:health.status==='ok',buildId:diagnostics.buildId,telemetry:diagnostics.telemetry,oauthAuthenticated:true,publicMcpAuthenticated:true,unauthenticatedStatus:unauthorized.status,batchCount:batch.data.count,batchPublicMs:batch.ms,batchResponseBytes:batch.bytes,listDirectory:{samples:listing.length,p50Ms:p(listing,.5),p95Ms:p(listing,.95)},activeManagedProcesses:active}));
+    console.log(JSON.stringify({...catalogEvidence,...smokeEvidence,classificationVerified,publicHealthMinimal:true,diagnosticsProtected:true,healthy:health.status==='ok',buildId:diagnostics.buildId,telemetry:diagnostics.telemetry,oauthAuthenticated:true,publicMcpAuthenticated:true,unauthenticatedStatus:unauthorized.status,batchCount:batch.data.count,batchPublicMs:batch.ms,batchResponseBytes:batch.bytes,listDirectory:{samples:listing.length,p50Ms:p(listing,.5),p95Ms:p(listing,.95)},activeManagedProcesses:active}));
   }
 } finally {
   // This provider revokes the whole grant, including both tokens, in one request.
