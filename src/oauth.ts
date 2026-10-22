@@ -703,6 +703,7 @@ export class RemoteDevOAuthProvider implements OAuthServerProvider {
       scopes: stored.scopes,
       expiresAt: Math.floor(stored.expiresAt / 1000),
       resource: new URL(stored.resource),
+      extra: { grantId: stored.grantId },
     };
   }
 

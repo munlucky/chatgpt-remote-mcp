@@ -1,6 +1,11 @@
 import path from "node:path";
+import os from "node:os";
 
 export interface AppConfig {
+  operatorApprovalEnabled: boolean;
+  operatorApprovalKey: string | undefined;
+  operatorApprovalTtlSeconds: number;
+  kernelHome: string;
   host: string;
   port: number;
   endpoint: string;
@@ -211,8 +216,25 @@ export function loadConfig(
   if (executionTracking !== "optional" && executionTracking !== "required") {
     throw new Error("MCP_EXECUTION_TRACKING must be optional or required");
   }
+  const operatorApprovalEnabled = parseBoolean(env.MCP_OPERATOR_APPROVAL_ENABLED, false);
+  const operatorApprovalKey = env.MCP_OPERATOR_APPROVAL_KEY?.trim() || undefined;
+  if (operatorApprovalEnabled) {
+    if (!operatorApprovalKey || operatorApprovalKey.length < 32 || operatorApprovalKey.length > 512) {
+      throw new Error("MCP_OPERATOR_APPROVAL_KEY must contain 32 to 512 characters when operator approvals are enabled");
+    }
+    if ([authToken, oauthApprovalKey, env.MCP_PROBE_SECRET?.trim()].includes(operatorApprovalKey)) {
+      throw new Error("MCP_OPERATOR_APPROVAL_KEY must be independent of connection and probe secrets");
+    }
+    normalizeOAuthUrl(publicUrl, "MCP_PUBLIC_URL");
+    if (new URL(publicUrl!).pathname !== "/") throw new Error("Operator approvals require MCP_PUBLIC_URL at the origin root");
+    if (!authToken && !oauthEnabled) throw new Error("Operator approvals require built-in bearer or OAuth authentication");
+  }
 
   return {
+    operatorApprovalEnabled,
+    operatorApprovalKey,
+    operatorApprovalTtlSeconds: parseInteger(env.MCP_OPERATOR_APPROVAL_TTL_SECONDS, 600, "MCP_OPERATOR_APPROVAL_TTL_SECONDS", 60, 3600),
+    kernelHome: path.resolve(env.MOON_RELAY_KERNEL_HOME?.trim() || path.join(os.homedir(), ".moon-relay-kernel")),
     probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
     usageLogDir: env.MCP_USAGE_LOG_DIR?.trim() || undefined,
     usageLogMaxBytes: parseInteger(env.MCP_USAGE_LOG_MAX_BYTES, 10 * 1024 * 1024, "MCP_USAGE_LOG_MAX_BYTES", 4096, 100 * 1024 * 1024),

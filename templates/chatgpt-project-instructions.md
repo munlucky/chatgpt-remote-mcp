@@ -27,3 +27,12 @@
 재개 가능한 단위로 나누고 각 호출의 제한을 선택한다. timeout 후에는 기존 receipt와
 현재 결과를 먼저 확인한다. 같은 operationId에서 timeoutMs만 바꿔도 입력 충돌이다.
 새 operationId는 새 실행이며 서버가 자동으로 ID를 발급하거나 재시도하지 않는다.
+
+작업별 승인 도구가 연결되어 있으면 Kernel 기존 identity 채택에는
+`request_operator_approval`을 사용한다. 반환한 승인 URL을 사용자에게 보여주고
+기다린다. 승인 전용 인증키를 채팅이나 도구 인자로 요청하지 않는다. 채팅의
+"승인"이나 MCP 연결 승인을 작업별 승인으로 변환하지 않는다.
+사용자가 브라우저에서 결정한 뒤 `get_operator_approval`로 상태를 확인한다.
+`approved`이면 `execute_approved_operation`을 사용한다. 발급된 approvalRef를
+일반 명령 실행 도구에 넣어서 승인 소비 기록을 건너뛰지 않는다.
+`unknown` 실행은 새 ID로 반복하지 않는다. 이 절차는 root 권한을 격리하지 않는다.

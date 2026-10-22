@@ -16,6 +16,7 @@ import type { AppConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
 import { createMcpServer, type McpServices } from "./mcp-server.js";
 import { OAUTH_SCOPES, RemoteDevOAuthProvider } from "./oauth.js";
+import { registerApprovalRoutes } from "./operator-approval-http.js";
 import { requestMetrics, safeRpcName, type RequestMetrics, type UsageEvent } from "./telemetry.js";
 
 interface ActiveRequest {
@@ -60,6 +61,7 @@ export async function startHttpServer(
   services: McpServices,
 ): Promise<RunningHttpServer> {
   await services.continuityService.initialize();
+  await services.operatorApprovalService.initialize();
   const app = express();
   if (config.oauthEnabled && (config.oauthAccessTokenTtlSeconds > 3600 || config.oauthRefreshTokenTtlSeconds > 2592000)) {
     console.warn("OAuth migration warning: configured TTL exceeds the recommended 1h access / 30d refresh policy. Update existing .env overrides; changing TTL does not invalidate issued tokens. See docs/security-migration.md.");
@@ -188,6 +190,7 @@ export async function startHttpServer(
   }
   const authenticate = createBearerAuth(config, oauthProvider);
   const parseMcpJson = express.json({ limit: config.maxRequestBody });
+  registerApprovalRoutes(app, services.operatorApprovalService);
 
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
@@ -342,6 +345,7 @@ export async function startHttpServer(
     activeMcpRequests = 0;
     await Promise.allSettled(requests.map((request) => request.server.close()));
     await services.processManager.shutdown();
+    await services.operatorApprovalService.close();
     await services.continuityService.close();
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => {

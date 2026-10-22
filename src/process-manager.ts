@@ -239,9 +239,13 @@ export class ProcessManager {
 
     const sessionId = request.sessionId ?? randomUUID();
     const startedAt = Date.now();
+    const childEnvironment = { ...process.env, ...request.env };
+    // Consent credentials belong to the HTTP approval form, never to subprocesses.
+    // Root filesystem access remains a separate, explicitly documented boundary.
+    delete childEnvironment.MCP_OPERATOR_APPROVAL_KEY;
     const child = spawn(request.executable, request.args, {
       cwd: request.cwd,
-      env: { ...process.env, ...request.env },
+      env: childEnvironment,
       stdio: "pipe",
       detached: process.platform !== "win32",
       windowsHide: true,

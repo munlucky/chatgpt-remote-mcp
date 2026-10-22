@@ -40,6 +40,7 @@ docs
 # Canonical MCP improvement plan; runtime evidence stays excluded.
 !/docs/
 /docs/*
+!/docs/operator-approval.md
 !/docs/plans/
 /docs/plans/*
 !/docs/plans/mcp-improvements-2026-10-10/

@@ -11,10 +11,13 @@ import { createExecToolRegistrar } from "./exec-tools.js";
 import { FileService } from "./file-service.js";
 import { createFileToolRegistrar } from "./file-tools.js";
 import { ProcessManager } from "./process-manager.js";
+import { OperatorApprovalService } from "./operator-approval.js";
+import { createApprovalToolRegistrar } from "./operator-approval-tools.js";
 import type { CachedToolRegistrar } from "./tool-metadata.js";
 import { requestMetrics, UsageLog } from "./telemetry.js";
 
 export interface McpServices {
+  operatorApprovalService: OperatorApprovalService;
   usageLog: UsageLog;
   processManager: ProcessManager;
   fileService: FileService;
@@ -102,14 +105,22 @@ export function createServices(config: AppConfig): McpServices {
   const fileTools = createFileToolRegistrar(config, fileService);
   const batchRead = createBatchReadRegistrar(config, fileService);
   const taskTools = createTaskToolRegistrar(config, continuityService);
+  const operatorApprovalService = new OperatorApprovalService(config, continuityService, processManager);
+  if (config.operatorApprovalEnabled) {
+    continuityService.additionalCompletionBlocker = taskId => operatorApprovalService.hasUnresolvedExecution(taskId);
+    continuityService.additionalExecutionContext = taskId => operatorApprovalService.executionContext(taskId);
+  }
+  const approvalTools = createApprovalToolRegistrar(config, operatorApprovalService);
   const registerTools: CachedToolRegistrar = (server, onlyTool) => {
     execTools(server, onlyTool);
     fileTools(server, onlyTool);
     batchRead(server, onlyTool);
     taskTools(server, onlyTool);
+    approvalTools(server, onlyTool);
   };
 
   return {
+    operatorApprovalService,
     usageLog,
     processManager,
     fileService,
@@ -133,7 +144,8 @@ export function createMcpServer(
     },
     {
       instructions:
-        `Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Checkpoint after verified stages; process exit is not task completion. Tracking policy: ${config.executionTracking}. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`,
+        `Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Checkpoint after verified stages; process exit is not task completion. Tracking policy: ${config.executionTracking}. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`
+        + (config.operatorApprovalEnabled ? ` Operator approval bridge: request_operator_approval supports eligible Kernel legacy identity adoption only. Show approvalUrl to the human and wait. Never collect the operator key in chat or tool arguments, infer consent from chat text, or invent approval references. After browser approval, use execute_approved_operation; do not pass issued references to exec_command/run_script to bypass consumption. Poll the existing approval/session; unknown requires inspection. This workflow does not isolate root capabilities.` : ""),
       capabilities: { logging: {} },
     },
   );

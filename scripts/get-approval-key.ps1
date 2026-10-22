@@ -1,5 +1,6 @@
 # get-approval-key.ps1
 # Retrieves the MCP OAuth Approval Key for client authentication
+param([switch]$Operator)
 
 $ErrorActionPreference = 'Stop'
 
@@ -13,18 +14,19 @@ if (-not (Test-Path $envFile)) {
 }
 
 $approvalKey = ""
+$keyName = if ($Operator) { 'MCP_OPERATOR_APPROVAL_KEY' } else { 'MCP_OAUTH_APPROVAL_KEY' }
 Get-Content $envFile | ForEach-Object {
-    if ($_ -match '^\s*MCP_OAUTH_APPROVAL_KEY\s*=\s*(.*)\s*$') {
+    if ($_ -match ('^\s*' + $keyName + '\s*=\s*(.*)\s*$')) {
         $approvalKey = $matches[1].Trim("'`"")
     }
 }
 
 if ([string]::IsNullOrWhiteSpace($approvalKey) -or $approvalKey -eq 'replace-with-a-random-secret') {
-    Write-Host "MCP_OAUTH_APPROVAL_KEY is not configured yet. Run .\scripts\setup-keys.ps1." -ForegroundColor Yellow
+    Write-Host "$keyName is not configured yet. Run .\scripts\setup-keys.ps1." -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host "`n=== ChatGPT Remote MCP OAuth Approval Key ===" -ForegroundColor Cyan
+Write-Host "`n=== ChatGPT Remote MCP $keyName ===" -ForegroundColor Cyan
 Write-Host "Approval Key: " -NoNewline
 Write-Host $approvalKey -ForegroundColor Green
 

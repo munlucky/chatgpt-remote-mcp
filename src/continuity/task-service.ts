@@ -73,6 +73,8 @@ function isWithin(root: string, candidate: string): boolean {
 }
 
 export class TaskContinuityService {
+  additionalCompletionBlocker?: (taskId: string) => Promise<boolean>;
+  additionalExecutionContext?: (taskId: string) => Promise<Record<string, unknown>[]>;
   constructor(
     readonly store: TaskStore,
     readonly workspaceIdentity: WorkspaceIdentityService,
@@ -254,6 +256,9 @@ export class TaskContinuityService {
       }
 
       const executions = await this.store.listExecutions(identity.workspaceId, task.taskId);
+      if (await this.additionalCompletionBlocker?.(task.taskId)) {
+        throw new McpToolError("unresolved_execution", "An approved operator operation is executing or has an unknown result; inspect get_operator_approval first");
+      }
       const unresolved = executions.filter((record) => {
         if (record.state === "prepared" || record.state === "running") return true;
         if (record.state !== "unknown") return false;
@@ -439,6 +444,7 @@ export class TaskContinuityService {
         lastObservedWorkspace: task.lastObservedWorkspace,
         legacy: task.legacy,
       },
+      ...(this.additionalExecutionContext ? { operatorApprovals: await this.additionalExecutionContext(task.taskId) } : {}),
       observation: current,
       drift: comparison.drift,
       driftReasons: comparison.reasons,

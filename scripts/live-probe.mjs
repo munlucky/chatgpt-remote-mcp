@@ -52,7 +52,11 @@ try {
     body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/list', params: {} }),
   }), 200);
   const catalog = (await catalogResponse.json()).result?.tools;
-  if (!Array.isArray(catalog) || catalog.length !== 24) throw new Error('Public tool catalog is incomplete');
+  const approvalsEnabled = ['1', 'true', 'yes', 'on'].includes((process.env.MCP_OPERATOR_APPROVAL_ENABLED || '').toLowerCase());
+  if (!Array.isArray(catalog) || catalog.length !== (approvalsEnabled ? 27 : 24)) throw new Error('Public tool catalog is incomplete');
+  if (approvalsEnabled) for (const name of ['request_operator_approval', 'get_operator_approval', 'execute_approved_operation']) {
+    if (!catalog.some(tool => tool.name === name)) throw new Error(`Operator approval tool not advertised: ${name}`);
+  }
   for (const name of ['get_work_context', 'checkpoint_work', 'complete_work']) {
     if (!catalog.some(tool => tool.name === name)) throw new Error(`Continuity tool not advertised: ${name}`);
   }

@@ -32,5 +32,6 @@ function Set-GeneratedSecret([string]$Name, [string[]]$Placeholders) {
 
 Set-GeneratedSecret 'MCP_OAUTH_APPROVAL_KEY' @('replace-with-a-random-secret', 'your_generated_32byte_hex_secret_key_here')
 Set-GeneratedSecret 'MCP_PROBE_SECRET' @('replace-with-a-random-probe-secret')
+Set-GeneratedSecret 'MCP_OPERATOR_APPROVAL_KEY' @('replace-with-a-random-operator-secret')
 [IO.File]::WriteAllText($envFile, $content, [Text.UTF8Encoding]::new($false))
 Write-Host 'Configure the remaining paths, endpoint and tunnel token in .env, then run scripts/start.ps1.'

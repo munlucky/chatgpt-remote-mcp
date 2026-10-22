@@ -1,9 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { RequestHandler } from "express";
 import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 
 import type { AppConfig } from "./config.js";
+import { requestPrincipal } from "./request-principal.js";
 
 export function tokensEqual(actual: string, expected: string): boolean {
   const actualBuffer = Buffer.from(actual);
@@ -34,7 +35,7 @@ export function createBearerAuth(
     const match = authorization?.match(/^Bearer\s+(.+)$/i);
     const suppliedToken = match?.[1];
     if (suppliedToken && config.authToken && tokensEqual(suppliedToken, config.authToken)) {
-      next();
+      requestPrincipal.run(`bearer:${createHash("sha256").update(suppliedToken).digest("hex")}`, next);
       return;
     }
 
@@ -48,7 +49,8 @@ export function createBearerAuth(
           authInfo.resource?.href === expectedResource &&
           authInfo.scopes.includes("mcp:tools")
         ) {
-          next();
+          const grant = authInfo.extra?.grantId;
+          requestPrincipal.run(`oauth:${authInfo.clientId}:${typeof grant === "string" ? grant : createHash("sha256").update(suppliedToken).digest("hex")}`, next);
           return;
         }
       } catch {

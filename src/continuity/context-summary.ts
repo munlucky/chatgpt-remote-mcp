@@ -92,6 +92,7 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
       drift: context.drift,
       evidence: context.evidence,
       warnings: context.warnings,
+      ...(context.operatorApprovals ? { operatorApprovals: context.operatorApprovals } : {}),
       resume: "inspection_required",
       summaryOmissions: { ...omitted, sizeLimit: 1 },
       recovery: summary.recovery,

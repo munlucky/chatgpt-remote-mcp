@@ -63,6 +63,29 @@ separate between external clients.
 The MCP server publishes 24 tools, including bounded `read_files` batching and three
 durable continuity tools: `get_work_context`, `checkpoint_work`, and `complete_work`.
 
+## Operator approval bridge
+
+The optional bridge adds three tools for **Kernel legacy project identity adoption**:
+`request_operator_approval`, `get_operator_approval`, and `execute_approved_operation`.
+The enabled catalog contains 27 tools; the default catalog remains 24. Arbitrary
+shell commands, identity data merges, deployments, and review overrides are outside
+this capability. See [the approval contract and operating steps](docs/operator-approval.md).
+
+Enable it with `MCP_OPERATOR_APPROVAL_ENABLED=true`. Run `scripts/setup-keys.ps1`
+to generate an independent `MCP_OPERATOR_APPROVAL_KEY`; it must contain 32–512
+characters and differ from connection/probe secrets. `scripts/get-approval-key.ps1
+-Operator` displays/copies it locally. Enter it only into the browser approval form.
+`MCP_OPERATOR_APPROVAL_TTL_SECONDS` defaults to 600 (allowed: 60–3600). Configuration
+changes require a normal deployment with the active-process guard. Refresh the
+ChatGPT connector catalog after deployment.
+
+This is an application consent and audit bridge. The existing unrestricted root
+execution and file tools remain able to access the same host and Kernel runtime.
+The bridge does not establish OS isolation or make a chat message cryptographic
+proof of human approval. Strong enforcement against a compromised root agent
+requires a separately protected approval broker, execution credentials, and a Kernel
+verifier for that broker. That infrastructure migration is outside this feature.
+
 `complete_work` accepts an optional `finalCheckpoint` (current: at most 2,048 characters).
 Completion now requires phase `completed`, a nonblank current, and empty remaining/blockers.
 Older clients must save that checkpoint through `checkpoint_work` first. Otherwise the call
