@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -25,11 +25,12 @@ const home=process.env.MOON_RELAY_KERNEL_HOME;
 const command=process.argv[3];
 const scenarioFile=path.join(home,'scenario.json');
 const scenario=fs.existsSync(scenarioFile)?JSON.parse(fs.readFileSync(scenarioFile,'utf8')):{};
-fs.appendFileSync(path.join(home,'calls.jsonl'),JSON.stringify({command,keyPresent:Boolean(process.env.MCP_OPERATOR_APPROVAL_KEY),args:process.argv.slice(4)})+'\\n');
+fs.appendFileSync(path.join(home,'calls.jsonl'),JSON.stringify({command,cwd:process.cwd(),keyPresent:Boolean(process.env.MCP_OPERATOR_APPROVAL_KEY),args:process.argv.slice(4)})+'\\n');
 if(command==='status'){
  const adopted=fs.existsSync(path.join(home,'adopted'));
  const root=process.cwd().replaceAll('\\\\','/').replace(/\\/+$/,'');
- console.log(JSON.stringify({status:adopted?'ready':'repair_required',projectId:adopted?'legacy-project':(scenario.changed?'changed-project':'source-project'),resolvedProjectId:'source-project',canonicalRoot:process.platform==='win32'?root.toLowerCase():root,runtimeHome:home,legacyCandidates:[{projectId:'legacy-project',hasData:true,hasPersistedIdentity:false,sameRootEvidence:true}]}));
+ const wrongPath=scenario.expectedCwd && process.cwd()!==scenario.expectedCwd;
+ console.log(JSON.stringify({status:wrongPath?'bootstrap_required':adopted?'ready':'repair_required',projectId:wrongPath?'canonical-path-project':adopted?'legacy-project':(scenario.changed?'changed-project':'source-project'),resolvedProjectId:'source-project',canonicalRoot:process.platform==='win32'?root.toLowerCase():root,runtimeHome:home,legacyCandidates:[{projectId:'legacy-project',hasData:true,hasPersistedIdentity:false,sameRootEvidence:true}]}));
 }else if(command==='approve'){
  fs.writeFileSync(path.join(home,'approved'), 'yes'); console.log('{}');
 }else if(command==='repair'){
@@ -44,9 +45,15 @@ describe("operator approval bridge", () => {
   let running: RunningHttpServer | undefined;
   let input: ApprovalInput;
   let endpoint: string;
+  let aliasRoot: string;
+  let continuityRoot: string;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(os.tmpdir(), "operator-approval-"));
+    aliasRoot = path.join(root, "kernel-view");
+    continuityRoot = path.join(root, "continuity-view");
+    await mkdir(aliasRoot);
+    await mkdir(continuityRoot);
     kernelHome = path.join(root, "kernel");
     const payload = path.join(kernelHome, ".moon-relay/kernel-payload");
     await mkdir(path.join(payload, "bin"), { recursive: true });
@@ -57,7 +64,8 @@ describe("operator approval bridge", () => {
     await writeFile(path.join(payload, "scripts/kernel/project-identity-preflight.js"), "// fixture\n");
     const config = loadConfig({ MCP_AUTH_TOKEN: "test-bearer", MCP_HOST: "127.0.0.1", MCP_PUBLIC_URL: "http://127.0.0.1",
       MCP_OPERATOR_APPROVAL_ENABLED: "true", MCP_OPERATOR_APPROVAL_KEY: key, MOON_RELAY_KERNEL_HOME: kernelHome,
-      MCP_CONTINUITY_STATE_DIR: path.join(root, "state"), MCP_DEFAULT_CWD: root }, root);
+      MCP_CONTINUITY_STATE_DIR: path.join(root, "state"), MCP_DEFAULT_CWD: root,
+      MCP_WORKSPACE_ALIASES: `${aliasRoot}=${continuityRoot}` }, root);
     config.port = 0;
     services = createServices(config);
     running = await startHttpServer(config, services);
@@ -112,6 +120,58 @@ describe("operator approval bridge", () => {
     }, { timeout: 7000, interval: 30 });
     return services.operatorApprovalService.get(id, principal);
   }
+
+  async function useAliasTask() {
+    const task = await services.continuityService.create({ cwd: continuityRoot, requestId: randomUUID(),
+      objective: "Adopt identity through a separate Kernel path",
+      checkpoint: { phase: "approval", current: "Waiting", completed: [], remaining: ["identity"], blockers: [], changedPaths: [], evidenceRefs: [] } });
+    input = { ...input, taskId: String(task.taskId), cwd: path.relative(root, aliasRoot) };
+    return services.continuityService.workspaceIdentity.resolve(continuityRoot);
+  }
+
+  it("keeps the requested Kernel path through consent and execution while binding the canonical continuity workspace", async () => {
+    const workspace = await useAliasTask();
+    const kernelCwd = await realpath(aliasRoot);
+    await writeFile(path.join(kernelHome, "scenario.json"), JSON.stringify({ expectedCwd: kernelCwd }));
+    const view = await request();
+    expect(view.cwd).toBe(kernelCwd);
+    const record = await services.operatorApprovalService.store.read(records => records.find(r => r.id === view.approvalRequestId)!);
+    expect(record).toMatchObject({ cwd: kernelCwd, workspaceId: workspace.workspaceId });
+    expect((await form(view)).html).toContain(kernelCwd);
+    // The same files may have a different Kernel identity at the continuity path.
+    const canonical = await rpc("request_operator_approval", { ...input, requestId: randomUUID(), cwd: continuityRoot });
+    expect(canonical.structuredContent.code).toBe("approval_identity_mismatch");
+    expect((await decide(view)).status).toBe(200);
+    const operationId = randomUUID();
+    await rpc("execute_approved_operation", { approvalRequestId: view.approvalRequestId, operationId });
+    expect(await settled(String(view.approvalRequestId))).toMatchObject({ status: "succeeded" });
+    const calls = (await readFile(path.join(kernelHome, "calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(calls.filter(call => call.command !== "status").map(call => call.cwd)).toEqual([kernelCwd, kernelCwd]);
+    expect(calls.filter(call => call.cwd === kernelCwd && call.command === "status")).toHaveLength(3);
+    expect((await rpc("execute_approved_operation", { approvalRequestId: view.approvalRequestId, operationId })).isError).not.toBe(true);
+  });
+
+  it("does not accept another workspace's task when retaining the original Kernel cwd", async () => {
+    const result = await rpc("request_operator_approval", { ...input, cwd: aliasRoot });
+    expect(result.structuredContent.code).toBe("approval_task_mismatch");
+    await expect(readFile(path.join(kernelHome, "calls.jsonl"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("blocks unresolved identity execution across different Kernel paths in the same continuity workspace", async () => {
+    await useAliasTask();
+    const first = await request();
+    const second = (await rpc("request_operator_approval", { ...input, requestId: randomUUID(), cwd: continuityRoot })).structuredContent;
+    expect(second.cwd).not.toBe(first.cwd);
+    expect((await decide(first)).status).toBe(200);
+    expect((await decide(second)).status).toBe(200);
+    await writeFile(path.join(kernelHome, "scenario.json"), JSON.stringify({ fail: true }));
+    await rpc("execute_approved_operation", { approvalRequestId: first.approvalRequestId, operationId: randomUUID() });
+    expect(await settled(String(first.approvalRequestId))).toMatchObject({ status: "unknown" });
+    const blocked = await rpc("execute_approved_operation", { approvalRequestId: second.approvalRequestId, operationId: randomUUID() });
+    expect(blocked.structuredContent.code).toBe("approval_unresolved_execution");
+    const calls = await readFile(path.join(kernelHome, "calls.jsonl"), "utf8");
+    expect(calls.match(/"command":"approve"/g)).toHaveLength(1);
+  });
 
   it("binds human consent to a fixed operation, executes once, and verifies the resulting identity", async () => {
     const view = await request();

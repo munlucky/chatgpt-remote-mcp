@@ -10,7 +10,7 @@ const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<",
 function page(record: ApprovalRecord, csrf: string): string {
   const expired = Date.parse(record.expiresAt) <= Date.now();
   const status = expired && ["pending", "approved"].includes(record.status) ? "expired" : record.status;
-  const rows = { "요청 ID": record.id, "작업": "Kernel 기존 프로젝트 ID 채택", "작업 경로": record.cwd, "Kernel 실행 환경": record.kernelHome,
+  const rows = { "요청 ID": record.id, "작업": "Kernel 기존 프로젝트 ID 채택", "Kernel 실행 경로": record.cwd, "Kernel 실행 환경": record.kernelHome,
     "현재 프로젝트 ID": record.sourceProjectId, "채택할 기존 ID": record.legacyProjectId,
     "연속 작업 ID": record.taskId, "요청 사유": record.reason, "만료 시각 (UTC)": record.expiresAt, "상태": status };
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

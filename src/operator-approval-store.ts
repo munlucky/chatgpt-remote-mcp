@@ -9,6 +9,7 @@ import { McpToolError } from "./errors.js";
 
 const recordSchema = z.object({
   id: z.uuid(), requestId: z.uuid(), owner: z.string().min(1), inputDigest: z.string(),
+  // workspaceId is the continuity binding; cwd is the independently resolved Kernel path.
   taskId: z.uuid(), workspaceId: z.string(), cwd: z.string(), reason: z.string().min(1).max(2048),
   operation: z.literal("kernel_identity_adopt"), sourceProjectId: z.string(), legacyProjectId: z.string(),
   kernelHome: z.string(), kernelCli: z.string(), kernelDigest: z.string(), identityDigest: z.string(),

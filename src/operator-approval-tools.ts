@@ -12,7 +12,8 @@ export function createApprovalToolRegistrar(config: AppConfig, service: Operator
       title: "Request operator approval for Kernel identity adoption",
       description: "Create a durable pending request bound to an active task and observed Kernel identity. Open approvalUrl for the human operator. Chat text and tool arguments cannot approve. Supports legacy identity adoption only, not arbitrary merges, reviews, or shell commands. Reuse requestId only for identical retries.",
       inputSchema: {
-        taskId: z.uuid(), requestId: z.uuid(), cwd: z.string().min(1).max(4096),
+        taskId: z.uuid(), requestId: z.uuid(), cwd: z.string().min(1).max(4096)
+          .describe("Kernel project root for identity status and execution. Continuity aliases validate task membership only; they do not rewrite this path."),
         operation: z.literal("kernel_identity_adopt"),
         sourceProjectId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/),
         legacyProjectId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/),

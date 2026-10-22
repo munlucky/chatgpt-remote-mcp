@@ -41,7 +41,8 @@ verification, plus removal of the agent's access to privileged Kernel state/keys
    do not replace a Kernel task contract. Inspect Kernel identity candidates first.
 4. Call `request_operator_approval` with `taskId`, a UUID `requestId`, `cwd`,
    `operation: "kernel_identity_adopt"`, `sourceProjectId`, `legacyProjectId`, and
-   `reason`. The service independently inspects the Kernel and requires
+   `reason`. Use the same Kernel project-root path that produced the source ID.
+   The service independently inspects the Kernel there and requires
    `repair_required`, a matching source, and an eligible legacy candidate.
 5. Open the returned `approvalUrl`. The human checks the immutable operation,
    workspace, runtime, IDs, task, reason, and expiry. Retrieve the key locally with
@@ -58,12 +59,28 @@ verification, plus removal of the agent's access to privileged Kernel state/keys
 
 ## Binding and execution
 
-Requests bind the authenticated owner, continuity task, canonical workspace,
-configured Kernel runtime, source/legacy project IDs, selected identity-candidate
-snapshot, and SHA-256 of the CLI entrypoint, CLI dispatcher, and identity approval
-module. A repository subdirectory or configured alias resolves to its workspace
-root. This digest is a change detector for these three modules, not a signature of
-the entire transitive Kernel installation.
+Requests keep two separate bindings:
+
+- `workspaceId` identifies the active continuity task. Workspace aliases and Git-root
+  discovery apply only to this binding and the workspace execution lock.
+- `cwd` is the Kernel execution path. It is resolved from the requested path and the
+  configured default cwd, then passed through filesystem `realpath`. Continuity alias
+  mapping and workspace-root substitution never change it. The initial status query,
+  consent page, saved record, and approved worker all use this same path.
+
+For example, with `/c/dev=/shared`, a request for `/c/dev/project` can bind to the
+continuity task under `/shared/project` while all Kernel commands run under
+`/c/dev/project`. Separate bind mounts retain their paths; filesystem symlinks resolve
+to their real targets. Requests must name the Kernel project root: the observed
+`canonicalRoot` must match the normalized execution path. Another workspace's task
+or another source ID is still rejected.
+
+Requests also bind the configured Kernel runtime, source/legacy project IDs,
+selected identity-candidate snapshot, and SHA-256 of the CLI entrypoint, CLI
+dispatcher, and identity approval module. This digest is a change detector for
+these three modules, not a signature of the entire transitive Kernel installation.
+The signed-ledger schema remains version 1. Existing records retain their original
+execution paths; no pending or approved request is silently retargeted.
 
 An approved request gets a server-generated `moonremote:approval:<uuid>` reference.
 Before spawn, the ledger records its one-time execution reservation durably. A
@@ -113,8 +130,10 @@ archive for audit and never blindly replay old requests.
 
 A crash, timeout, worker failure, or unverifiable final output gives `unknown`.
 On restart, persisted `executing` records also become `unknown`. Exact retries
-return the existing state. New identity execution on the same workspace and task
-completion remain blocked by unresolved executions. Inspect Kernel identity,
+return the existing state. New identity execution is blocked across the same
+continuity workspace, including requests with different alias paths. The exact
+execution path also remains a blocking key. Task completion remains blocked by
+unresolved executions. Inspect Kernel identity,
 receipts, files, and any retained process output. Do not automatically repeat the
 repair. The current bridge intentionally has no model-callable uncertainty override;
 an administrator must inspect and resolve/archive the record offline.
@@ -123,5 +142,8 @@ an administrator must inspect and resolve/archive the record offline.
 
 The integration suite uses an isolated CLI double to test HTTP/MCP authentication,
 browser decisions, binding, duplicates, drift, failures, signed-ledger integrity,
-and restart recovery. It does not approve or repair real user projects. Production
+and restart recovery. Alias regression tests use separate execution directories
+with path-dependent identities and check the full consent/worker sequence, task
+membership rejection, and uncertainty blocking across aliases.
+It does not approve or repair real user projects. Production
 deployment and a real identity-adoption decision are separate operating steps.

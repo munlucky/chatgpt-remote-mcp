@@ -17,6 +17,11 @@ export interface ApprovalInput {
   operation: "kernel_identity_adopt"; sourceProjectId: string; legacyProjectId: string; reason: string;
 }
 
+interface ApprovalExecutionBinding {
+  kernelCwd: string;
+  workspaceId: string;
+}
+
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const expired = (record: ApprovalRecord) => Date.parse(record.expiresAt) <= Date.now();
 
@@ -69,6 +74,14 @@ export class OperatorApprovalService {
     return identity.workspaceId;
   }
 
+  private async bindExecutionTarget(input: ApprovalInput): Promise<ApprovalExecutionBinding> {
+    // Continuity aliases identify the task. They must not select the Kernel identity.
+    // realpath resolves filesystem links, but preserves distinct bind-mount paths.
+    const kernelCwd = await realpath(path.resolve(this.config.defaultCwd, input.cwd));
+    const workspaceId = await this.activeTask(input.taskId, kernelCwd);
+    return { kernelCwd, workspaceId };
+  }
+
   async request(input: ApprovalInput, principal?: string): Promise<Record<string, unknown>> {
     const owner = this.owner(principal);
     const inputDigest = hash(JSON.stringify(input));
@@ -77,18 +90,16 @@ export class OperatorApprovalService {
       if (duplicate.inputDigest !== inputDigest) throw new McpToolError("idempotency_conflict", "requestId was used for different approval input");
       return this.view(duplicate);
     }
-    const workspace = await this.continuity.workspaceIdentity.resolve(path.resolve(this.config.defaultCwd, input.cwd));
-    const cwd = await realpath(workspace.executionRoot);
-    const workspaceId = await this.activeTask(input.taskId, cwd);
+    const { kernelCwd, workspaceId } = await this.bindExecutionTarget(input);
     const kernelHome = await realpath(this.config.kernelHome);
     const kernelCli = path.join(kernelHome, ".moon-relay/kernel-payload/bin/moon-relay-kernel.mjs");
     const digest = await kernelDigest(kernelCli);
     const { stdout } = await promisify(execFile)(process.execPath, [kernelCli, "identity", "status", "--json"], {
-      cwd, env: { ...process.env, MOON_RELAY_KERNEL_HOME: kernelHome, MCP_OPERATOR_APPROVAL_KEY: "" },
+      cwd: kernelCwd, env: { ...process.env, MOON_RELAY_KERNEL_HOME: kernelHome, MCP_OPERATOR_APPROVAL_KEY: "" },
       encoding: "utf8", timeout: 15000, maxBuffer: 256 * 1024, windowsHide: true,
     });
     const status = JSON.parse(stdout) as Record<string, unknown>;
-    const normalizedRoot = cwd.replaceAll("\\", "/").replace(/\/+$/, "");
+    const normalizedRoot = kernelCwd.replaceAll("\\", "/").replace(/\/+$/, "");
     if (status.projectId !== input.sourceProjectId || status.canonicalRoot !== (process.platform === "win32" ? normalizedRoot.toLowerCase() : normalizedRoot)
       || status.runtimeHome !== kernelHome) {
       throw new McpToolError("approval_identity_mismatch", "Kernel identity does not match the requested workspace, runtime, or source project");
@@ -104,7 +115,7 @@ export class OperatorApprovalService {
       }
       if (records.length >= 1000) throw new McpToolError("storage_full", "Approval ledger reached its 1000-record limit");
       const record: ApprovalRecord = {
-        ...input, cwd, workspaceId, owner, inputDigest, kernelHome, kernelCli, kernelDigest: digest, identityDigest,
+        ...input, cwd: kernelCwd, workspaceId, owner, inputDigest, kernelHome, kernelCli, kernelDigest: digest, identityDigest,
         id: randomUUID(), viewToken: randomBytes(32).toString("hex"), status: "pending",
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + this.config.operatorApprovalTtlSeconds * 1000).toISOString(),
       };
@@ -167,7 +178,8 @@ export class OperatorApprovalService {
       if (record.status !== "approved" || expired(record) || !record.approvalRef) {
         throw new McpToolError("approval_required", "A current operator approval is required");
       }
-      if (records.some(r => r.id !== id && r.cwd === record.cwd && ["executing", "unknown"].includes(r.status))) {
+      if (records.some(r => r.id !== id && (r.workspaceId === record.workspaceId || r.cwd === record.cwd)
+        && ["executing", "unknown"].includes(r.status))) {
         throw new McpToolError("approval_unresolved_execution", "Inspect the earlier identity execution before starting another");
       }
       if (records.some(r => r.operationId === operationId)) throw new McpToolError("idempotency_conflict", "operationId was used for another approval");
