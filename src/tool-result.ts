@@ -43,7 +43,12 @@ export async function runTool(
   const metrics = requestMetrics.getStore();
   const started = performance.now();
   try {
-    const result = successResult(await operation(), formatter);
+    const data = await operation();
+    if (metrics && typeof data.running === "boolean" && typeof data.output === "string") {
+      metrics.processRead = { running: data.running, hasMore: data.hasMore === true,
+        outputBytes: Buffer.byteLength(data.output), droppedOutputBytes: Number(data.droppedOutputBytes) || 0 };
+    }
+    const result = successResult(data, formatter);
     if (metrics) metrics.toolError = false;
     return result;
   } catch (error) {

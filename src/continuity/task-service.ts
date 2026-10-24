@@ -1,3 +1,4 @@
+import { bindRequest } from "../telemetry-correlation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -115,7 +116,10 @@ export class TaskContinuityService {
     return this.store.withWorkspaceLock(identity.workspaceId, async () => {
       const state = await this.store.readWorkspace(identity);
       const dedupe = this.checkDedupe(state, input.requestId, "create", inputHmac);
-      if (dedupe) return clone(dedupe.result);
+      if (dedupe) {
+        bindRequest({ workspaceId: identity.workspaceId, taskId: dedupe.taskId });
+        return clone(dedupe.result);
+      }
       if (state.activeTaskId) {
         const active = state.tasks[state.activeTaskId];
         throw new McpToolError(
@@ -157,6 +161,7 @@ export class TaskContinuityService {
         now,
       );
       await this.store.writeWorkspace(state);
+      bindRequest({ workspaceId: identity.workspaceId, taskId });
       return result;
     });
   }
@@ -183,7 +188,10 @@ export class TaskContinuityService {
     return this.store.withWorkspaceLock(identity.workspaceId, async () => {
       const state = await this.store.readWorkspace(identity);
       const dedupe = this.checkDedupe(state, input.requestId, "update", inputHmac);
-      if (dedupe) return clone(dedupe.result);
+      if (dedupe) {
+        bindRequest({ workspaceId: identity.workspaceId, taskId: dedupe.taskId });
+        return clone(dedupe.result);
+      }
       const task = this.requireActiveTask(state, input.taskId);
       if (task.revision !== input.expectedRevision) {
         throw new McpToolError(
@@ -245,7 +253,10 @@ export class TaskContinuityService {
     return this.store.withWorkspaceLock(identity.workspaceId, async () => {
       const state = await this.store.readWorkspace(identity);
       const dedupe = this.checkDedupe(state, input.requestId, "complete", inputHmac);
-      if (dedupe) return clone(dedupe.result);
+      if (dedupe) {
+        bindRequest({ workspaceId: identity.workspaceId, taskId: dedupe.taskId });
+        return clone(dedupe.result);
+      }
       const task = this.requireActiveTask(state, input.taskId);
       if (task.revision !== input.expectedRevision) {
         throw new McpToolError(
@@ -360,6 +371,7 @@ export class TaskContinuityService {
     } else if (input.cwd) {
       const identity = await this.workspaceIdentity.resolve(input.cwd);
       const state = await this.store.readWorkspace(identity);
+      bindRequest({ workspaceId: identity.workspaceId });
       if (state.activeTaskId) {
         const task = state.tasks[state.activeTaskId];
         if (task) selected = { state, task };
@@ -409,6 +421,7 @@ export class TaskContinuityService {
     }
 
     const { state, task } = selected!;
+    bindRequest({ workspaceId: state.workspace.workspaceId, taskId: task.taskId });
     const current = await observeWorkspace(state.workspace, this.options.snapshotLimits);
     const comparison = compareWorkspace(task.lastObservedWorkspace, current);
     const allExecutions = await this.store.listExecutions(state.workspace.workspaceId, task.taskId);
@@ -564,6 +577,7 @@ export class TaskContinuityService {
     if (!found) throw new McpToolError("unknown_task", `Unknown task: ${taskId}`);
     const task = found.state.tasks[taskId];
     if (!task) throw new McpToolError("state_corrupt", `Task index is inconsistent: ${taskId}`);
+    bindRequest({ workspaceId: found.state.workspace.workspaceId, taskId: task.taskId });
     return { state: found.state, task };
   }
 

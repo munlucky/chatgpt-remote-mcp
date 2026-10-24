@@ -2,13 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import path from "node:path";
 import * as z from "zod/v4";
 
+import { bindRequest } from "./telemetry-correlation.js";
 import type { AppConfig } from "./config.js";
 import { McpToolError } from "./errors.js";
 import type { ExecutionRecorder } from "./continuity/execution-recorder.js";
 import type { ExecutionRecord } from "./continuity/task-types.js";
 import { FileService } from "./file-service.js";
 import { ProcessManager } from "./process-manager.js";
-import { DEFAULT_PROCESS_YIELD_MS, runScript } from "./script-runner.js";
+import { runScript } from "./script-runner.js";
 import { runTool, type SuccessResultFormatter } from "./tool-result.js";
 import {
   createCachedToolRegistrar,
@@ -27,17 +28,21 @@ function processResult(
   // The manager's workspace binding is internal. Keep IDs visible to clients,
   // including clients which consume only the text content block.
   const { tracking: _binding, ...process } = result;
+  const safeTerminal = !result.running && !result.hasMore && result.exitCode === 0
+    && result.signal === null && result.timedOut === false
+    && tracking?.executionState === "exited" && tracking.persistenceState === "ok";
   const nextCall = result.running || result.hasMore
     ? {
         tool: "read_process",
         arguments: {
           sessionId: result.sessionId,
           afterSeq: result.nextSeq,
+          waitMode: result.waitMode ?? "output",
           waitMs: result.hasMore ? 0 : DEFAULT_PROCESS_POLL_AFTER_MS,
           maxOutputBytes: RECOVERY_OUTPUT_BYTES,
         },
       }
-    : tracking
+    : tracking && !safeTerminal
       ? { tool: "get_work_context", arguments: { taskId: tracking.taskId } }
       : undefined;
   return {
@@ -114,6 +119,7 @@ async function trackedProcessResult(
     await processManager.waitForTerminalHooks(result.sessionId);
   }
   const receipt = await executionRecorder.store.readExecution(workspaceId, operationId);
+  bindRequest({ taskId, operationId, workspaceId, sessionId: result.sessionId, executionBootId: receipt?.bootId ?? executionRecorder.store.bootId });
   return processResult(result, {
     taskId,
     operationId,
@@ -231,7 +237,7 @@ export function registerExecTools(
     {
       title: "Execute command",
       description:
-        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Run an unrestricted shell command on the host with the service's full OS permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; follow nextCall with read_process or write_stdin. Never use a new operationId to retry an uncertain execution.`,
+        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Run an unrestricted shell command on the host with the service's full OS permissions. A successful start always returns a process session ID. By default the call waits ${config.defaultProcessYieldMs} ms, then returns status=accepted when work is still running; follow nextCall with read_process or write_stdin. Never use a new operationId to retry an uncertain execution.`,
       inputSchema: {
         taskId: taskIdSchema,
         operationId: operationIdSchema,
@@ -256,9 +262,9 @@ export function registerExecTools(
           .int()
           .min(0)
           .max(30_000)
-          .default(DEFAULT_PROCESS_YIELD_MS)
+          .default(config.defaultProcessYieldMs)
           .describe(
-            "How long to wait for the process to exit before returning state. Defaults to 750 ms; if still running, the call returns status=accepted with sessionId and pollAfterMs for read_process. Zero returns immediately.",
+            `How long to wait for the process to exit. Server default: ${config.defaultProcessYieldMs} ms. A running process returns status=accepted; use read_process. Zero returns immediately. Successful durable termination with fully drained output needs no automatic context lookup; process exit is not task completion.`,
           ),
         maxOutputBytes: maxOutputBytesSchema,
       },
@@ -370,7 +376,7 @@ export function registerExecTools(
     {
       title: "Run script",
       description:
-        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution has the service's full host permissions. A successful start always returns a process session ID. By default the call waits only 750 ms, then returns status=accepted when work is still running; follow nextCall with read_process. Never use a new operationId to retry an uncertain execution.`,
+        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Write a supplied script to a temporary executable file and run it with Bash, sh, Node.js, Python, or an arbitrary interpreter. Execution has the service's full host permissions. A successful start always returns a process session ID. By default the call waits ${config.defaultProcessYieldMs} ms, then returns status=accepted when work is still running; follow nextCall with read_process. Never use a new operationId to retry an uncertain execution.`,
       inputSchema: {
         taskId: taskIdSchema,
         operationId: operationIdSchema,
@@ -400,9 +406,9 @@ export function registerExecTools(
           .int()
           .min(0)
           .max(30_000)
-          .default(DEFAULT_PROCESS_YIELD_MS)
+          .default(config.defaultProcessYieldMs)
           .describe(
-            "How long to wait for the script process to exit before returning state. Defaults to 750 ms; if still running, the call returns status=accepted with sessionId and pollAfterMs for read_process. Zero returns immediately.",
+            `How long to wait for the script to exit. Server default: ${config.defaultProcessYieldMs} ms. A running process returns status=accepted; use read_process. Zero returns immediately. Successful durable termination with fully drained output needs no automatic context lookup; process exit is not task completion.`,
           ),
         maxOutputBytes: maxOutputBytesSchema,
         keepScript: z
@@ -583,10 +589,11 @@ export function registerExecTools(
     {
       title: "Read process output",
       description:
-        "Poll a managed process for output and terminal state, including its task/operation IDs and durable execution state when tracked. Follow nextCall; pass the previous nextSeq as afterSeq to receive only newer output. Process completion is not task completion. Use list_processes for compact status without output.",
+        "Read a managed process for output and terminal state. waitMode=output returns on new output or exit; terminal waits for exit or the wait budget. Successful durable termination with drained output has no automatic context lookup. Process exit is not task completion. Read including its task/operation IDs and durable execution state when tracked. Follow nextCall; pass the previous nextSeq as afterSeq to receive only newer output. Process completion is not task completion. Use list_processes for compact status without output.",
       inputSchema: {
         sessionId: sessionIdSchema,
         afterSeq: afterSeqSchema,
+        waitMode: z.enum(["output", "terminal"]).default("output").describe("output wakes on new output or exit; terminal ignores output notifications and waits for exit or waitMs. Both preserve cursors and output limits."),
         waitMs: z
           .number()
           .int()
@@ -601,7 +608,7 @@ export function registerExecTools(
       annotations: TOOL_ANNOTATIONS.readOnlyClosed,
       _meta: authMetadata,
     },
-    async ({ sessionId, afterSeq, waitMs, maxOutputBytes }) =>
+    async ({ sessionId, afterSeq, waitMode, waitMs, maxOutputBytes }) =>
       runProcessTool(async () =>
         observedProcessResult(
           processManager,
@@ -609,6 +616,7 @@ export function registerExecTools(
           await processManager.read(sessionId, {
             afterSeq,
             waitMs,
+            waitMode,
             maxOutputBytes,
           }),
         ),

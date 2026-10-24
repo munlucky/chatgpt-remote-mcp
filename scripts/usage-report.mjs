@@ -1,24 +1,70 @@
 import { createReadStream } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
+import { readEvent } from './usage-report-input.mjs';
+import { analyze, compareReceipts, diagnosticCoverage, processKey } from './usage-report-integrity.mjs';
 const dir = process.argv[2] || '/var/log/mcp-usage';
-const explicitRange = process.argv[3] === '--since';
-const hours = explicitRange ? null : Number(process.argv[3] || 24);
-if (!explicitRange && (!Number.isFinite(hours) || hours <= 0)) throw new Error('hours must be positive');
-const since = explicitRange ? Date.parse(process.argv[4]) : Date.now() - hours * 3600000;
-const until = explicitRange ? Date.parse(process.argv[6]) : Date.now();
-if (explicitRange && (process.argv[5] !== '--until' || !/[zZ]|[+-]\d\d:\d\d$/.test(process.argv[4] || '') || !/[zZ]|[+-]\d\d:\d\d$/.test(process.argv[6] || '') || !Number.isFinite(since) || !Number.isFinite(until) || since >= until)) throw new Error('Use --since ISO_TIMESTAMP --until ISO_TIMESTAMP with explicit time zones and increasing boundaries');
+const args = process.argv.slice(3);
+const options = {};
+const hours = args[0] && !args[0].startsWith('--') ? Number(args.shift()) : 24;
+if (!Number.isFinite(hours) || hours <= 0) throw new Error('hours must be positive');
+while (args.length) {
+  const key = args.shift();
+  if (!['--since','--until','--task-id','--workspace-id','--build-id','--receipts-dir'].includes(key) || !args.length || args[0].startsWith('--') || options[key]) throw new Error('Unknown, repeated or incomplete option');
+  options[key] = args.shift();
+}
+const explicitRange = Boolean(options['--since'] || options['--until']);
+const since = explicitRange ? Date.parse(options['--since']) : Date.now() - hours * 3600000;
+const until = explicitRange ? Date.parse(options['--until']) : Date.now();
+if (explicitRange && (![options['--since'], options['--until']].every(v => typeof v === 'string' && /(?:[zZ]|[+-]\d\d:\d\d)$/.test(v)) || !Number.isFinite(since) || !Number.isFinite(until) || since >= until)) throw new Error('Use --since ISO_TIMESTAMP --until ISO_TIMESTAMP with explicit time zones and increasing boundaries');
+const inWindow = e => Date.parse(e.timestamp) >= since && Date.parse(e.timestamp) < until;
+const inScope = e => (!options['--task-id'] || e.correlation?.taskId === options['--task-id'])
+  && (!options['--workspace-id'] || e.correlation?.workspaceId === options['--workspace-id'])
+  && (!options['--build-id'] || e.buildId === options['--build-id']);
+const all = [];
+const inputCoverage = [];
 const groups = new Map(); let malformed = 0; let samples = 0; let excludedProbes = 0;
 const started = new Map(), terminal = new Map();
 for (const file of (await readdir(dir)).filter(f => /^requests\.jsonl(?:\.\d+)?$/.test(f))) {
-  const reader = createInterface({ input: createReadStream(path.join(dir,file)), crlfDelay: Infinity });
-  for await (const line of reader) {
-    let e; try { e = JSON.parse(line); } catch { malformed++; continue; }
-    if (!(Date.parse(e.timestamp) >= since && Date.parse(e.timestamp) < until)) continue;
-    if (e.trafficClass === 'probe') { excludedProbes++; continue; }
-    if (e.event === 'process_started') { started.set(`${e.bootId}|${e.sessionId}`, e); continue; }
-    if (e.event === 'process_terminal') { terminal.set(`${e.bootId}|${e.sessionId}`, e); continue; }
+  const coverage = { file, bytesRead: 0, status: 'read', incompleteLastLine: false };
+  inputCoverage.push(coverage);
+  try {
+    const before = await stat(path.join(dir,file));
+    const stream = createReadStream(path.join(dir,file));
+    let lastByte, invalidLast = false;
+    stream.on('data', chunk => { coverage.bytesRead += chunk.length; lastByte = chunk.at(-1); });
+    const reader = createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of reader) {
+      invalidLast = false;
+      let e;
+      try { e = readEvent(JSON.parse(line)); } catch { malformed++; invalidLast = true; continue; }
+      if (!e || !e.timestamp) { malformed++; continue; }
+      if (e.trafficClass !== 'probe') all.push(e);
+      if (inWindow(e) && inScope(e) && e.trafficClass === 'probe') excludedProbes++;
+    }
+    if (lastByte !== undefined && lastByte !== 10 && invalidLast) { coverage.incompleteLastLine = true; malformed--; }
+    const after = await stat(path.join(dir,file));
+    if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) coverage.status = 'changed_during_scan';
+  } catch { coverage.status = 'unavailable_or_rotated'; }
+}
+// A reply can be lost before selection. Join only a single validated lifecycle binding
+// with the exact server request ID and boot; never copy user request arguments.
+const requestBindings = new Map();
+for (const e of all.filter(e => e.event === 'process_started' && e.requestId && e.correlation)) {
+  const key = JSON.stringify([e.bootId, e.requestId]);
+  if (!requestBindings.has(key)) requestBindings.set(key, e.correlation);
+  else if (JSON.stringify(requestBindings.get(key)) !== JSON.stringify(e.correlation)) requestBindings.set(key, null);
+}
+for (const e of all.filter(e => e.event === 'mcp_request' && !e.correlation?.taskId)) {
+  const binding = requestBindings.get(JSON.stringify([e.bootId, e.requestId]));
+  if (binding) { e.correlation = binding; e.correlationSource = "derived_from_lifecycle"; }
+}
+for (const e of all.filter(e => e.event === "mcp_request")) e.correlationSource ??= e.correlation?.taskId ? "direct" : "unlinked";
+const selected = all.filter(e => inWindow(e) && inScope(e));
+for (const e of selected) {
+    if (e.event === 'process_started') { started.set(processKey(e) ?? `legacy-start-${started.size}`, e); continue; }
+    if (e.event === 'process_terminal') { terminal.set(processKey(e) ?? `legacy-end-${terminal.size}`, e); continue; }
     if (e.event !== 'mcp_request') continue;
     if (!Number.isFinite(e.durationMs)) { malformed++; continue; }
     const clientClass = ['codex', 'openai_mcp', 'other'].includes(e.clientClass) ? e.clientClass : 'legacy_unknown';
@@ -33,8 +79,10 @@ for (const file of (await readdir(dir)).filter(f => /^requests\.jsonl(?:\.\d+)?$
     else if (e.toolName) g.toolUnobserved++;
     if (e.outcome === 'aborted') g.aborted++;
     for (const [field,value] of [['duration',e.durationMs],['setup',e.setupMs],['tool',e.toolMs],['bytes',e.responseBytes]]) if (Number.isFinite(value)) g[field].push(value);
-  }
 }
+const analysis = analyze(all, selected, since, until);
+analysis.integrity = await compareReceipts(analysis.integrity, options['--receipts-dir']);
+analysis.diagnostics = await diagnosticCoverage(dir, selected, options['--build-id'], since, until);
 const percentile = (values,p) => values.length ? +[...values].sort((a,b)=>a-b)[Math.max(0,Math.ceil(values.length*p)-1)].toFixed(2) : null;
 const values = [...terminal.values()];
 const failed = e => (Number.isInteger(e.exitCode) && e.exitCode !== 0) || e.timedOut === true || e.spawnFailed === true || Boolean(e.signal);
@@ -55,6 +103,7 @@ for (const e of values) {
   if (ms !== null) { group.cumulativeExecutionMs += ms; group.measuredDurations++; }
 }
 for (const group of timeoutLimits.values()) if (!group.measuredDurations) group.cumulativeExecutionMs = null;
+const failureDurations = values.filter(failed).map(duration).filter(ms => ms !== null);
 const successDurations = values.filter(succeeded).map(duration).filter(ms => ms !== null);
 const executions = {
   started: started.size,
@@ -69,8 +118,9 @@ const executions = {
   withoutTerminalInWindow: [...started.keys()].filter(key => !terminal.has(key)).length,
   timeoutLimits: [...timeoutLimits.values()].sort((a, b) => (a.timeoutMs ?? Infinity) - (b.timeoutMs ?? Infinity)),
   successfulExecutionDuration: { samples: successDurations.length, p50Ms: percentile(successDurations, .5), p95Ms: percentile(successDurations, .95), cumulativeExecutionMs: successDurations.length ? successDurations.reduce((a,b) => a+b, 0) : null },
+  failedExecutionDuration: { samples: failureDurations.length, p50Ms: percentile(failureDurations,.5), p95Ms: percentile(failureDurations,.95), cumulativeExecutionMs: failureDurations.length ? failureDurations.reduce((a,b) => a+b,0) : null },
   lifecycleJoin: 'Exact (bootId, sessionId) only. Historical receipt/log boot mismatches remain legacy; never merge boots automatically.',
   durationNote: 'Cumulative measured execution durations can overlap. They are neither wall-clock delay nor time wasted. Failure axes can overlap; failed counts each terminal execution once.',
   note: 'Metadata observations only, not task authority. Missing terminal events may mean running work, crash, log retention, or observation loss; never automatically retry. Legacy requests have no lifecycle coverage.',
 };
-console.log(JSON.stringify({ generatedAt: new Date().toISOString(), hours, period: { since: new Date(since).toISOString(), until: new Date(until).toISOString() }, samples, excludedProbes, malformed, executions, note: 'Retained rolling window only; marked probes excluded (historical marks may be spoofed). Overhead is per-request duration minus tool time, not a difference of percentiles. Sparse samples and different commands are not comparable performance proof. Tool time includes deliberate execution waits.', groups: [...groups.values()].map(g => ({ buildId:g.buildId, clientClass:g.clientClass, call:g.call, count:g.count, errors:g.errors, httpFailures:g.httpFailures, toolErrors:g.toolErrors, toolSucceeded:g.toolSucceeded, toolUnobserved:g.toolUnobserved, aborted:g.aborted, p50Ms:percentile(g.duration,.5), p95Ms:percentile(g.duration,.95), setupP95Ms:percentile(g.setup,.95), overheadP95Ms:percentile(g.overhead,.95), toolP95Ms:percentile(g.tool,.95), responseBytesP95:percentile(g.bytes,.95) })).sort((a,b)=>b.count-a.count) }, null, 2));
+console.log(JSON.stringify({ generatedAt: new Date().toISOString(), hours, period: { since: new Date(since).toISOString(), until: new Date(until).toISOString() }, filters: { taskId: options['--task-id'] ?? null, workspaceId: options['--workspace-id'] ?? null, buildId: options['--build-id'] ?? null }, samples, excludedProbes, malformed, inputCoverage, executions, ...analysis, note: 'Retained rolling window only; marked probes excluded (historical marks may be spoofed). Overhead is per-request duration minus tool time, not a difference of percentiles. Sparse samples and different commands are not comparable performance proof. Tool time includes deliberate execution waits.', groups: [...groups.values()].map(g => ({ buildId:g.buildId, clientClass:g.clientClass, call:g.call, count:g.count, errors:g.errors, httpFailures:g.httpFailures, toolErrors:g.toolErrors, toolSucceeded:g.toolSucceeded, toolUnobserved:g.toolUnobserved, aborted:g.aborted, p50Ms:percentile(g.duration,.5), p95Ms:percentile(g.duration,.95), setupP95Ms:percentile(g.setup,.95), overheadP95Ms:percentile(g.overhead,.95), toolP95Ms:percentile(g.tool,.95), responseBytesP95:percentile(g.bytes,.95) })).sort((a,b)=>b.count-a.count) }, null, 2));

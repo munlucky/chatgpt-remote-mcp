@@ -1,9 +1,18 @@
-param([int]$Hours = 24)
+param([int]$Hours = 24, [string]$Since, [string]$Until,
+  [string]$TaskId, [string]$WorkspaceId, [string]$BuildId, [string]$ReceiptsDir)
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path -Parent $PSScriptRoot
 $reportDir = Join-Path $projectDir 'docs/runtime'
 New-Item -ItemType Directory -Force $reportDir | Out-Null
-$result = docker compose --project-directory $projectDir -f (Join-Path $projectDir 'docker-compose.yml') exec -T workmachine node /opt/chatgpt-remote-mcp/scripts/usage-report.mjs /var/log/mcp-usage $Hours
+$reportArgs = @('/var/log/mcp-usage', "$Hours")
+if ($Since -or $Until) {
+  if (-not $Since -or -not $Until) { throw 'Since and Until must be supplied together' }
+  $reportArgs += @('--since', $Since, '--until', $Until)
+}
+foreach ($filter in @(@('--task-id', $TaskId), @('--workspace-id', $WorkspaceId), @('--build-id', $BuildId), @('--receipts-dir', $ReceiptsDir))) {
+  if ($filter[1]) { $reportArgs += $filter }
+}
+$result = docker compose --project-directory $projectDir -f (Join-Path $projectDir 'docker-compose.yml') exec -T workmachine node /opt/chatgpt-remote-mcp/scripts/usage-report.mjs @reportArgs
 if ($LASTEXITCODE -ne 0) { throw 'Usage report failed' }
 $report = $result | ConvertFrom-Json
 $target = Join-Path $reportDir ('usage-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')

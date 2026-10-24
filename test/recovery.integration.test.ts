@@ -125,7 +125,9 @@ describe.sequential("GPT work recovery over stateless HTTP", () => {
       expect.objectContaining({ status: "fulfilled" }),
     ]);
     const completed = await resumed.callTool({ name: "read_process", arguments: { sessionId, afterSeq: 0, maxOutputBytes: 16 * 1024 } });
-    expect(data(completed)).toMatchObject({ taskId, operationId, completed: true, executionState: "exited", persistenceState: "ok", exitCode: 0, nextCall: { tool: "get_work_context", arguments: { taskId } } });
+    expect(data(completed)).toMatchObject({ taskId, operationId, completed: true, executionState: "exited", persistenceState: "ok", exitCode: 0 });
+    expect(data(completed)).not.toHaveProperty("nextCall");
+    expect(header(completed)).not.toHaveProperty("nextCall");
     expect(header(completed)).toMatchObject({ taskId, operationId, executionState: "exited" });
     expect(await readFile(path.join(root, "counter.txt"), "utf8")).toBe("once\n");
     expect(data(await resumed.callTool({ name: "get_work_context", arguments: { taskId } })).task.status).toBe("active");

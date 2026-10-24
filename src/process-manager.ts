@@ -1,3 +1,4 @@
+import { bindRequest } from "./telemetry-correlation.js";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isAscii } from "node:buffer";
@@ -167,12 +168,14 @@ export interface StartProcessRequest {
 }
 
 export interface ReadProcessRequest {
+  waitMode?: "output" | "terminal" | undefined;
   afterSeq?: number | undefined;
   waitMs?: number | undefined;
   maxOutputBytes?: number | undefined;
 }
 
 export interface ProcessReadResult {
+  waitMode?: "output" | "terminal";
   sessionId: string;
   tracking?: ProcessTracking | undefined;
   command: string;
@@ -196,7 +199,8 @@ export interface ProcessReadResult {
 }
 
 export interface ProcessManagerOptions {
-  observeTerminal?: (process: { sessionId: string; startedAt: string; timeoutMs: number }) => ((event: ProcessTerminalEvent) => void) | undefined;
+  bootId?: string;
+  observeTerminal?: (process: { sessionId: string; startedAt: string; timeoutMs: number; tracking?: ProcessTracking | undefined }) => ((event: ProcessTerminalEvent) => void) | undefined;
   maxRetainedOutputBytes: number;
   maxTotalRetainedOutputBytes: number;
   processRetentionMs: number;
@@ -252,7 +256,7 @@ export class ProcessManager {
     });
     let terminalObserver: ManagedProcess["terminalObserver"];
     try {
-      terminalObserver = this.#options.observeTerminal?.({ sessionId, startedAt: new Date(startedAt).toISOString(), timeoutMs: request.timeoutMs ?? 0 });
+      terminalObserver = this.#options.observeTerminal?.({ sessionId, startedAt: new Date(startedAt).toISOString(), timeoutMs: request.timeoutMs ?? 0, tracking: request.tracking });
     } catch { /* observation must not orphan a spawned process */ }
     const managed: ManagedProcess = {
       sessionId,
@@ -338,10 +342,12 @@ export class ProcessManager {
     request: ReadProcessRequest = {},
   ): Promise<ProcessReadResult> {
     const managed = this.#require(sessionId);
+    bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     const afterSeq = Math.max(0, request.afterSeq ?? 0);
     const waitMs = Math.max(0, request.waitMs ?? 0);
     if (waitMs > 0) {
-      await this.#waitForOutput(managed, afterSeq, waitMs);
+      if (request.waitMode === "terminal") await this.waitForExit(sessionId, waitMs);
+      else await this.#waitForOutput(managed, afterSeq, waitMs);
     }
 
     const maxOutputBytes = Math.max(
@@ -388,6 +394,7 @@ export class ProcessManager {
       stdout,
       stderr,
       output,
+      waitMode: request.waitMode ?? "output",
       nextSeq: selected.nextSeq,
       hasMore: selected.hasMore,
       totalOutputBytes: managed.totalOutputBytes,
@@ -401,6 +408,7 @@ export class ProcessManager {
     closeStdin = false,
   ): Promise<void> {
     const managed = this.#require(sessionId);
+    bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     if (input.length === 0 && !closeStdin) {
       return;
     }
@@ -429,6 +437,7 @@ export class ProcessManager {
 
   async waitForExit(sessionId: string, waitMs: number): Promise<void> {
     const managed = this.#require(sessionId);
+    bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     if (!this.#isRunning(managed) || waitMs <= 0) {
       return;
     }
@@ -453,6 +462,7 @@ export class ProcessManager {
 
   async waitForTerminalHooks(sessionId: string): Promise<void> {
     const managed = this.#require(sessionId);
+    bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     if (managed.terminalPromise) {
       await managed.terminalPromise;
     }
@@ -464,6 +474,7 @@ export class ProcessManager {
     graceMs = 3000,
   ): Promise<ProcessReadResult> {
     const managed = this.#require(sessionId);
+    bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     if (this.#isRunning(managed)) {
       this.#signal(managed, signal);
       if (signal !== "SIGKILL" && graceMs > 0) {

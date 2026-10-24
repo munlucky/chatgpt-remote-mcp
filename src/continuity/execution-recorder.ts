@@ -1,3 +1,4 @@
+import { bindRequest } from "../telemetry-correlation.js";
 import { McpToolError } from "../errors.js";
 import type { WorkspaceIdentityService } from "./workspace-identity.js";
 import type { ExecutionRecord } from "./task-types.js";
@@ -60,6 +61,7 @@ export class ExecutionRecorder {
               `operationId ${input.operationId} was already used for a different execution`,
             );
           }
+          bindRequest({ ...existing, executionBootId: existing.bootId });
           return { record: existing, shouldSpawn: false };
         }
 
@@ -84,6 +86,7 @@ export class ExecutionRecorder {
           errorCode: null,
         };
         await this.store.writeExecution(record);
+        bindRequest({ ...record, executionBootId: record.bootId });
         return { record, shouldSpawn: true };
       });
     });

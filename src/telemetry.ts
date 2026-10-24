@@ -1,9 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { safeErrorCode } from "./errors.js";
+import type { Correlation } from "./telemetry-correlation.js";
+import { serializeUsageEvent } from "./telemetry-schema.js";
 
 export interface RequestMetrics {
+  correlation?: Correlation;
+  processRead?: { running: boolean; hasMore: boolean; outputBytes: number; droppedOutputBytes: number };
   clientClass?: "codex" | "openai_mcp" | "other";
   requestId?: string;
   trafficClass?: "probe" | "usage";
@@ -16,14 +19,13 @@ export interface RequestMetrics {
 }
 export const requestMetrics = new AsyncLocalStorage<RequestMetrics>();
 
-const tools = new Set("exec_command run_script write_stdin read_process terminate_process list_processes list_directory stat_path read_file read_files write_file replace_in_file apply_patch upload_file download_file hash_file make_directory copy_path move_path remove_path chmod_path get_work_context checkpoint_work complete_work request_operator_approval get_operator_approval execute_approved_operation".split(" "));
-const methods = new Set(["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"]);
-export function safeRpcName(value: unknown, kind: "tool" | "method"): string | null {
-  if (typeof value !== "string") return null;
-  return (kind === "tool" ? tools : methods).has(value) ? value : "other";
-}
+export { safeRpcName } from "./telemetry-schema.js";
 
 export interface UsageEvent {
+  schemaVersion?: number;
+  bootId?: string;
+  correlation?: Correlation;
+  processRead?: RequestMetrics["processRead"];
   event: "mcp_request";
   timestamp: string;
   requestId: string;
@@ -48,6 +50,8 @@ export interface UsageEvent {
 }
 
 export interface ProcessUsageEvent {
+  schemaVersion?: number;
+  correlation?: Correlation;
   event: "process_terminal";
   timestamp: string;
   requestId: string;
@@ -69,6 +73,8 @@ export interface ProcessUsageEvent {
 }
 
 export interface ProcessStartedEvent {
+  schemaVersion?: number;
+  correlation?: Correlation;
   event: "process_started";
   timestamp: string;
   requestId: string;
@@ -99,12 +105,29 @@ export class UsageLog {
   #flushTimer: NodeJS.Timeout | undefined;
   droppedEvents = 0;
   writeFailures = 0;
+  #observation?: { bootId: string; buildId: string; since: string };
 
   constructor(
     readonly directory: string | undefined,
     readonly maxBytes = 10 * 1024 * 1024,
     readonly files = 7,
   ) {}
+
+  startObservation(bootId: string, buildId: string): void {
+    this.#observation = { bootId, buildId, since: new Date().toISOString() };
+  }
+
+  async snapshot(): Promise<void> {
+    if (!this.directory || !this.#observation) return;
+    const file = path.join(this.directory, `diagnostics-${this.#observation.bootId}.json`);
+    try {
+      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await writeFile(`${file}.tmp`, JSON.stringify({ schemaVersion: 2, ...this.#observation,
+        until: new Date().toISOString(), pendingEvents: this.#pending,
+        droppedEvents: this.droppedEvents, writeFailures: this.writeFailures }), { mode: 0o600 });
+      await rename(`${file}.tmp`, file);
+    } catch { /* Missing independent diagnostic evidence is unknown, never zero loss. */ }
+  }
 
   get pendingEvents(): number {
     return this.#pending;
@@ -117,9 +140,7 @@ export class UsageLog {
       return;
     }
 
-    const line = `${JSON.stringify({ ...event,
-      ...("errorCode" in event && event.errorCode != null ? { errorCode: safeErrorCode(event.errorCode) } : {}),
-    })}\n`;
+    const line = `${JSON.stringify(serializeUsageEvent(event))}\n`;
     this.#buffer.push(line);
     this.#bufferBytes += Buffer.byteLength(line);
     this.#pending++;
@@ -156,8 +177,9 @@ export class UsageLog {
         this.writeFailures++;
         this.#initialized = false;
       })
-      .finally(() => {
+      .finally(async () => {
         this.#pending = Math.max(0, this.#pending - lines.length);
+        await this.snapshot();
       });
   }
 
@@ -225,5 +247,6 @@ export class UsageLog {
   async flush(): Promise<void> {
     this.#enqueueBuffered();
     await this.#queue;
+    await this.snapshot();
   }
 }

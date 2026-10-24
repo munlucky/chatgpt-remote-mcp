@@ -14,6 +14,7 @@ import { ProcessManager } from "./process-manager.js";
 import { OperatorApprovalService } from "./operator-approval.js";
 import { createApprovalToolRegistrar } from "./operator-approval-tools.js";
 import type { CachedToolRegistrar } from "./tool-metadata.js";
+import { correlation } from "./telemetry-correlation.js";
 import { requestMetrics, UsageLog } from "./telemetry.js";
 
 export interface McpServices {
@@ -34,7 +35,9 @@ export function createServices(config: AppConfig): McpServices {
     maxTotalBytes: config.continuityMaxTotalBytes,
   });
   const bootId = taskStore.bootId;
+  usageLog.startObservation(bootId, config.buildId || "unknown");
   const processManager = new ProcessManager({
+    bootId,
     observeTerminal: (process) => {
       const metrics = requestMetrics.getStore();
       const requestId = metrics?.requestId;
@@ -42,12 +45,14 @@ export function createServices(config: AppConfig): McpServices {
       if (!requestId || (toolName !== "exec_command" && toolName !== "run_script")) return undefined;
       const trafficClass = metrics?.trafficClass ?? "usage";
       const clientClass = metrics?.clientClass;
+      const { tracking, ...metadata } = process;
+      const binding = correlation({ ...tracking, executionBootId: bootId, sessionId: process.sessionId, unlinkedReason: tracking ? null : "untracked" });
       usageLog.record({
-        ...process, event: "process_started", timestamp: process.startedAt,
+        ...metadata, schemaVersion: 2, correlation: binding, event: "process_started", timestamp: process.startedAt,
         requestId, toolName, trafficClass, clientClass, bootId, buildId: config.buildId || "unknown",
       });
       return (event) => usageLog.record({
-        ...event,
+        ...event, schemaVersion: 2, correlation: binding,
         event: "process_terminal",
         timestamp: event.endedAt,
         requestId,
@@ -144,7 +149,7 @@ export function createMcpServer(
     },
     {
       instructions:
-        `Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Checkpoint after verified stages; process exit is not task completion. Tracking policy: ${config.executionTracking}. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`
+        `Tracking policy: ${config.executionTracking}. Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Successful durable process exit with all output drained needs no automatic context lookup. Use context again for reconnect, failure or uncertainty. Chat chooses checkpoint boundaries; process exit is not task completion. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`
         + (config.operatorApprovalEnabled ? ` Operator approval bridge: request_operator_approval supports eligible Kernel legacy identity adoption only. Show approvalUrl to the human and wait. Never collect the operator key in chat or tool arguments, infer consent from chat text, or invent approval references. After browser approval, use execute_approved_operation; do not pass issued references to exec_command/run_script to bypass consumption. Poll the existing approval/session; unknown requires inspection. This workflow does not isolate root capabilities.` : ""),
       capabilities: { logging: {} },
     },

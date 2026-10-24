@@ -28,6 +28,7 @@ export interface AppConfig {
   maxRequestBody: string;
   maxOutputBytes: number;
   defaultProcessOutputBytes: number;
+  defaultProcessYieldMs: number;
   maxRetainedProcessOutputBytes: number;
   maxTotalRetainedProcessOutputBytes: number;
   processRetentionMs: number;
@@ -294,6 +295,7 @@ export function loadConfig(
     maxRequestBody: env.MCP_MAX_REQUEST_BODY?.trim() || "8mb",
     maxOutputBytes,
     defaultProcessOutputBytes,
+    defaultProcessYieldMs: parseInteger(env.MCP_DEFAULT_PROCESS_YIELD_MS, 750, "MCP_DEFAULT_PROCESS_YIELD_MS", 0, 30_000),
     maxRetainedProcessOutputBytes,
     maxTotalRetainedProcessOutputBytes,
     processRetentionMs: parseInteger(

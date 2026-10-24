@@ -154,6 +154,33 @@ file edits, stdin writes, or external effects retried under a different operatio
 Process start, polling, stdin and termination responses preserve the tracked task and
 operation IDs, receipt state and persistence state in both text and structured results.
 `nextCall` supplies `read_process` with the returned `nextSeq` and a 16 KiB output limit.
+
+Successful process exit needs no automatic `get_work_context` call when all output
+is drained, exitCode is zero, there is no signal or timeout, and the durable receipt
+is `exited` with persistence `ok`. Failure, uncertainty and reconnect retain recovery
+guidance. Chat chooses when to checkpoint; process exit does not complete a task.
+
+`MCP_DEFAULT_PROCESS_YIELD_MS` configures the default wait for execution tools and
+`write_stdin` from 0 to 30000 ms. The default remains 750 ms. Per-call `yieldTimeMs`
+overrides it. `read_process` accepts `waitMode=output` (default: return on new output
+or exit) and `waitMode=terminal` (wait for exit or `waitMs`, ignoring output wakeups).
+Both modes preserve output limits and `nextSeq`. A wait budget or HTTP disconnect
+does not terminate the process. Waiting settings do not change operation identity.
+
+After `npm run build`, run `node scripts/execution-benchmark.mjs --terminal` for a
+fixed local workload and per-setting polling, latency, output and deduplication data.
+Usage reports accept task/workspace/build filters and an optional read-only receipt
+directory. See [execution contracts](docs/plans/mcp-improvements-2026-10-10/EXECUTION-CONTROL.md)
+and [measured results](docs/plans/mcp-improvements-2026-10-10/EXECUTION-CONTROL-MEASUREMENT.md).
+
+The optional `scripts/harness-compatibility-smoke.mjs` accepts
+`--harness-executable`, `--harness-prefix-json` (an argument array), and `--projects-dir`.
+It creates its own disposable project and isolated Harness runtime beneath that
+directory. Use the installed public launcher; the smoke does not import Harness
+modules. It records `skipped` when no Harness is configured/installed and `blocked`
+when an installed Harness requires an unsupported action or approval. Core tests
+work without a Harness. On Windows, `npm test` uses a separate disposable Linux
+container; `MCP_TEST_IMAGE` can select an existing project image.
 Drain `hasMore=true` even if the process has exited. After the output is drained, a
 tracked result directs the caller to work context; process completion never closes a
 task. A duplicate tracked start is explicitly marked `duplicate=true`, including when

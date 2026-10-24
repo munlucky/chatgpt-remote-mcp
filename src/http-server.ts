@@ -17,6 +17,8 @@ import { errorMessage } from "./errors.js";
 import { createMcpServer, type McpServices } from "./mcp-server.js";
 import { OAUTH_SCOPES, RemoteDevOAuthProvider } from "./oauth.js";
 import { registerApprovalRoutes } from "./operator-approval-http.js";
+import { serializeUsageEvent } from "./telemetry-schema.js";
+import { correlation } from "./telemetry-correlation.js";
 import { requestMetrics, safeRpcName, type RequestMetrics, type UsageEvent } from "./telemetry.js";
 
 interface ActiveRequest {
@@ -110,6 +112,9 @@ export async function startHttpServer(
       logged = true;
       const event: UsageEvent = {
           event: "mcp_request",
+          schemaVersion: 2, bootId: services.continuityService.store.bootId,
+          correlation: metrics.correlation ?? correlation({ unlinkedReason: metrics.toolName ? "not_selected" : "not_applicable" }),
+          ...(metrics.processRead ? { processRead: metrics.processRead } : {}),
           timestamp: new Date().toISOString(),
           buildId: config.buildId || "unknown",
           trafficClass: response.locals.authenticatedMcp === true && config.probeSecret
@@ -136,7 +141,7 @@ export async function startHttpServer(
           ...(metrics.errorCode ? { errorCode: metrics.errorCode } : {}),
           responseBytes: outcome === "completed" ? responseBytes : null,
         };
-      if (config.usageConsoleLog) console.log(JSON.stringify(event));
+      if (config.usageConsoleLog) console.log(JSON.stringify(serializeUsageEvent(event)));
       usageLog.record(event);
     };
     response.once("finish", () => logCompletion("completed"));
