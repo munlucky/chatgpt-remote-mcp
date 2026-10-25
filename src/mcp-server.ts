@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { ArtifactService } from "./artifact-service.js";
+import { createArtifactToolRegistrar } from "./artifact-tools.js";
 import { createBatchReadRegistrar } from "./batch-read.js";
 import type { AppConfig } from "./config.js";
 import { ExecutionRecorder } from "./continuity/execution-recorder.js";
@@ -22,6 +24,7 @@ export interface McpServices {
   usageLog: UsageLog;
   processManager: ProcessManager;
   fileService: FileService;
+  artifactService: ArtifactService;
   continuityService: TaskContinuityService;
   executionRecorder: ExecutionRecorder;
   registerTools: CachedToolRegistrar;
@@ -77,6 +80,13 @@ export function createServices(config: AppConfig): McpServices {
     maxEditFileBytes: config.maxEditFileBytes,
     maxOutputBytes: config.maxOutputBytes,
   });
+  const artifactService = new ArtifactService({
+    defaultCwd: config.defaultCwd,
+    ttlSeconds: config.artifactTtlSeconds,
+    maxBytes: config.artifactMaxBytes,
+    maxActive: config.artifactMaxActive,
+    publicUrl: () => config.publicUrl,
+  });
   const workspaceIdentity = new WorkspaceIdentityService(
     () => taskStore.installationId,
     config.continuityWorkspaceAliases,
@@ -108,6 +118,7 @@ export function createServices(config: AppConfig): McpServices {
     executionRecorder,
   );
   const fileTools = createFileToolRegistrar(config, fileService);
+  const artifactTools = createArtifactToolRegistrar(config, artifactService);
   const batchRead = createBatchReadRegistrar(config, fileService);
   const taskTools = createTaskToolRegistrar(config, continuityService);
   const operatorApprovalService = new OperatorApprovalService(config, continuityService, processManager);
@@ -119,6 +130,7 @@ export function createServices(config: AppConfig): McpServices {
   const registerTools: CachedToolRegistrar = (server, onlyTool) => {
     execTools(server, onlyTool);
     fileTools(server, onlyTool);
+    artifactTools(server, onlyTool);
     batchRead(server, onlyTool);
     taskTools(server, onlyTool);
     approvalTools(server, onlyTool);
@@ -129,6 +141,7 @@ export function createServices(config: AppConfig): McpServices {
     usageLog,
     processManager,
     fileService,
+    artifactService,
     continuityService,
     executionRecorder,
     registerTools,

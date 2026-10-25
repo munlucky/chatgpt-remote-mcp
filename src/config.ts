@@ -2,6 +2,9 @@ import path from "node:path";
 import os from "node:os";
 
 export interface AppConfig {
+  artifactTtlSeconds: number;
+  artifactMaxBytes: number;
+  artifactMaxActive: number;
   operatorApprovalEnabled: boolean;
   operatorApprovalKey: string | undefined;
   operatorApprovalTtlSeconds: number;
@@ -232,6 +235,27 @@ export function loadConfig(
   }
 
   return {
+    artifactTtlSeconds: parseInteger(
+      env.MCP_ARTIFACT_TTL_SECONDS,
+      10 * 60,
+      "MCP_ARTIFACT_TTL_SECONDS",
+      60,
+      24 * 60 * 60,
+    ),
+    artifactMaxBytes: parseInteger(
+      env.MCP_ARTIFACT_MAX_BYTES,
+      100 * 1024 * 1024,
+      "MCP_ARTIFACT_MAX_BYTES",
+      1024,
+      1024 * 1024 * 1024,
+    ),
+    artifactMaxActive: parseInteger(
+      env.MCP_ARTIFACT_MAX_ACTIVE,
+      64,
+      "MCP_ARTIFACT_MAX_ACTIVE",
+      1,
+      10_000,
+    ),
     operatorApprovalEnabled,
     operatorApprovalKey,
     operatorApprovalTtlSeconds: parseInteger(env.MCP_OPERATOR_APPROVAL_TTL_SECONDS, 600, "MCP_OPERATOR_APPROVAL_TTL_SECONDS", 60, 3600),

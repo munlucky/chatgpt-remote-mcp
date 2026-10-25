@@ -6,6 +6,7 @@ import { requestMetrics } from "./telemetry.js";
 export interface SuccessResultFormatter {
   contentText(data: Record<string, unknown>): string;
   structuredContent(data: Record<string, unknown>): Record<string, unknown>;
+  content?(data: Record<string, unknown>): CallToolResult["content"];
 }
 
 export function successResult(
@@ -13,12 +14,14 @@ export function successResult(
   formatter?: SuccessResultFormatter,
 ): CallToolResult {
   return {
-    content: [
-      {
-        type: "text",
-        text: formatter ? formatter.contentText(data) : JSON.stringify(data),
-      },
-    ],
+    content: formatter?.content
+      ? formatter.content(data)
+      : [
+          {
+            type: "text",
+            text: formatter ? formatter.contentText(data) : JSON.stringify(data),
+          },
+        ],
     structuredContent: formatter ? formatter.structuredContent(data) : data,
   };
 }

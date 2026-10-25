@@ -26,6 +26,7 @@ const ALL_TOOLS = [
   "list_processes",
   "make_directory",
   "move_path",
+  "publish_file",
   "read_file",
   "read_files",
   "read_process",
@@ -56,6 +57,7 @@ const EXPECTED_ANNOTATIONS = {
   list_processes: [true, false, true, false],
   make_directory: [false, false, true, false],
   move_path: [false, true, true, false],
+  publish_file: [false, false, false, false],
   read_file: [true, false, true, false],
   read_files: [true, false, true, false],
   read_process: [true, false, true, false],
@@ -154,7 +156,9 @@ describe.sequential("all registered MCP tools", () => {
       config.port = 0;
       running = await startHttpServer(config, createServices(config));
       const address = running.httpServer.address() as AddressInfo;
-      endpoint = new URL(`http://127.0.0.1:${address.port}${config.endpoint}`);
+      const origin = `http://127.0.0.1:${address.port}`;
+      config.publicUrl = origin;
+      endpoint = new URL(`${origin}${config.endpoint}`);
     }
 
     client = new Client({ name: "all-tools-e2e", version: "1.0.0" });
@@ -686,6 +690,36 @@ describe.sequential("all registered MCP tools", () => {
         digest: createHash(algorithm).update(binary).digest("hex"),
       });
     }
+
+    const publishResult = await call("publish_file", {
+      path: "transfer/artifact.bin",
+      cwd: testRoot,
+      downloadName: "artifact-download.bin",
+    });
+    expect(publishResult.isError).not.toBe(true);
+    const published = structured(publishResult);
+    expect(published).not.toHaveProperty("token");
+    expect(published).toMatchObject({
+      name: "artifact-download.bin",
+      size: binary.length,
+      sha256: createHash("sha256").update(binary).digest("hex"),
+      downloadUrl: expect.stringMatching(/^https?:[/][/]/),
+      expiresAt: expect.any(String),
+    });
+    expect(publishResult.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "resource_link",
+        uri: published.downloadUrl,
+        name: "artifact-download.bin",
+      }),
+    ]));
+    const artifactResponse = await fetch(String(published.downloadUrl));
+    expect(artifactResponse.status).toBe(200);
+    expect(artifactResponse.headers.get("cache-control")).toBe("no-store");
+    expect(artifactResponse.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(artifactResponse.headers.get("x-artifact-sha256")).toBe(published.sha256);
+    expect(artifactResponse.headers.get("content-disposition")).toContain("attachment");
+    expect(Buffer.from(await artifactResponse.arrayBuffer())).toEqual(binary);
 
     await callOk("write_file", {
       path: "transfer/base64-copy.bin",

@@ -290,7 +290,7 @@ describe("operator approval bridge", () => {
       accept: "application/json, text/event-stream", "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) });
     const catalog = (await response.json() as { result: { tools: Array<{ name: string }> } }).result.tools;
-    expect(catalog).toHaveLength(27);
+    expect(catalog).toHaveLength(28);
     expect(catalog.map(t => t.name)).toEqual(expect.arrayContaining(["request_operator_approval", "get_operator_approval", "execute_approved_operation"]));
     vi.stubEnv("MCP_OPERATOR_APPROVAL_KEY", "should-not-reach-child");
     try {

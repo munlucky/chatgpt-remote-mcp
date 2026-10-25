@@ -36,6 +36,9 @@ describe("loadConfig", () => {
       maxTotalRetainedProcessOutputBytes: 64 * 1024 * 1024,
       maxProcesses: 128,
       maxRunningProcesses: 12,
+      artifactTtlSeconds: 600,
+      artifactMaxBytes: 100 * 1024 * 1024,
+      artifactMaxActive: 64,
       usageConsoleLog: false,
       continuityMaxSnapshotBytes: 8 * 1024 * 1024,
       executionTracking: "optional",
@@ -77,6 +80,31 @@ describe("loadConfig", () => {
       MCP_MAX_RUNNING_PROCESSES: "3",
     }, "/tmp")).toThrow("MCP_MAX_RUNNING_PROCESSES must be an integer between 1 and 2");
   });
+  it("loads artifact delivery limits and rejects out-of-range values", () => {
+    expect(loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_ARTIFACT_TTL_SECONDS: "900",
+      MCP_ARTIFACT_MAX_BYTES: "2097152",
+      MCP_ARTIFACT_MAX_ACTIVE: "8",
+    }, "/tmp")).toMatchObject({
+      artifactTtlSeconds: 900,
+      artifactMaxBytes: 2 * 1024 * 1024,
+      artifactMaxActive: 8,
+    });
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_ARTIFACT_TTL_SECONDS: "59",
+    }, "/tmp")).toThrow("MCP_ARTIFACT_TTL_SECONDS must be an integer between 60 and 86400");
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_ARTIFACT_MAX_BYTES: "1023",
+    }, "/tmp")).toThrow("MCP_ARTIFACT_MAX_BYTES must be an integer between 1024 and 1073741824");
+    expect(() => loadConfig({
+      MCP_AUTH_TOKEN: "secret",
+      MCP_ARTIFACT_MAX_ACTIVE: "0",
+    }, "/tmp")).toThrow("MCP_ARTIFACT_MAX_ACTIVE must be an integer between 1 and 10000");
+  });
+
   it("rejects partial integers and ports outside the valid range", () => {
     for (const value of ["3000oops", "3000.9", "70000"]) {
       expect(() =>

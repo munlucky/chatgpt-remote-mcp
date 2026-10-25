@@ -118,6 +118,12 @@ location = /health {
     proxy_pass http://127.0.0.1:3000;
 }
 
+location ^~ /artifacts/ {
+    include /etc/nginx/snippets/workmachine-proxy.conf;
+    proxy_buffering off;
+    proxy_pass http://127.0.0.1:3000;
+}
+
 location ^~ /operator-approvals/ {
     include /etc/nginx/snippets/workmachine-proxy.conf;
     access_log off;

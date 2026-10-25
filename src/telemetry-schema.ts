@@ -1,7 +1,7 @@
 import { safeErrorCode } from "./errors.js";
 import type { UsageEvent, ProcessUsageEvent, ProcessStartedEvent } from "./telemetry.js";
 
-const tools = new Set("exec_command run_script write_stdin read_process terminate_process list_processes list_directory stat_path read_file read_files write_file replace_in_file apply_patch upload_file download_file hash_file make_directory copy_path move_path remove_path chmod_path get_work_context checkpoint_work complete_work request_operator_approval get_operator_approval execute_approved_operation".split(" "));
+const tools = new Set("exec_command run_script write_stdin read_process terminate_process list_processes list_directory stat_path read_file read_files write_file replace_in_file apply_patch upload_file download_file publish_file hash_file make_directory copy_path move_path remove_path chmod_path get_work_context checkpoint_work complete_work request_operator_approval get_operator_approval execute_approved_operation".split(" "));
 const methods = new Set(["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"]);
 export function safeRpcName(value: unknown, kind: "tool" | "method"): string | null {
   if (typeof value !== "string") return null;

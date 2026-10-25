@@ -11,6 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express, { type Request, type Response } from "express";
 
+import { ARTIFACT_ROUTE } from "./artifact-service.js";
 import { createBearerAuth, createHostValidation, tokensEqual } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
@@ -197,6 +198,28 @@ export async function startHttpServer(
   const parseMcpJson = express.json({ limit: config.maxRequestBody });
   registerApprovalRoutes(app, services.operatorApprovalService);
 
+  app.get(`${ARTIFACT_ROUTE}/:token`, async (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.set("X-Content-Type-Options", "nosniff");
+    const token = typeof request.params.token === "string" ? request.params.token : "";
+    const artifact = await services.artifactService.resolve(token);
+    if (!artifact) {
+      response.status(404).type("text/plain").send("Artifact not found");
+      return;
+    }
+    response.set("X-Artifact-SHA256", artifact.sha256);
+    response.set("Content-Length", String(artifact.size));
+    response.attachment(artifact.name);
+    response.sendFile(artifact.snapshotPath, (error) => {
+      if (!error) return;
+      if (!response.headersSent) {
+        response.status(404).type("text/plain").send("Artifact not found");
+      } else {
+        response.destroy(error);
+      }
+    });
+  });
+
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
   });
@@ -334,6 +357,7 @@ export async function startHttpServer(
 
   const cleanupInterval = setInterval(() => {
     services.processManager.prune();
+    void services.artifactService.prune();
   }, Math.min(config.processRetentionMs, 60_000));
   cleanupInterval.unref();
 
@@ -361,6 +385,7 @@ export async function startHttpServer(
         }
       });
     });
+    await services.artifactService.close();
     await new Promise<void>((resolve) => setImmediate(resolve));
     await usageLog.flush();
   };

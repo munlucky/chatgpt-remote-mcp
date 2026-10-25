@@ -50,7 +50,7 @@ and support exact, start-inclusive/end-exclusive timestamp boundaries:
 node scripts/usage-report.mjs /var/log/mcp-usage --since 2026-10-09T00:00:00+09:00 --until 2026-10-10T00:00:00+09:00
 ```
 
-The live verifier also checks the public tool catalog for all 24 tools, the three
+The live verifier also checks the public tool catalog for all 25 tools, the three
 continuity tools and execution tracking inputs, and returns its catalog digest.
 Server catalog verification does not prove that a client's connector catalog has
 refreshed. Resolve connector catalog differences without modifying project tasks.
@@ -60,14 +60,30 @@ Nginx trust boundary. Nginx rewrites `X-Forwarded-For` to that single normalized
 address and Express trusts only the immediate Nginx hop, keeping OAuth rate limits
 separate between external clients.
 
-The MCP server publishes 24 tools, including bounded `read_files` batching and three
-durable continuity tools: `get_work_context`, `checkpoint_work`, and `complete_work`.
+The MCP server publishes 25 tools, including bounded `read_files` batching, generic
+`publish_file` artifact delivery, and three durable continuity tools:
+`get_work_context`, `checkpoint_work`, and `complete_work`.
+
+### Published artifacts
+
+`publish_file` snapshots a regular file into process-scoped temporary storage and
+returns a short-lived capability URL plus an MCP `resource_link`. The download route
+does not expose the source path and does not require a bearer token; possession of the
+unguessable URL grants access until its TTL expires or the server restarts. Do not
+forward a published URL beyond its intended recipient.
+
+Defaults are a 10-minute TTL, 100 MiB per artifact, and 64 active artifacts. Configure
+these with `MCP_ARTIFACT_TTL_SECONDS`, `MCP_ARTIFACT_MAX_BYTES`, and
+`MCP_ARTIFACT_MAX_ACTIVE`. Production `MCP_PUBLIC_URL` must be an HTTPS origin-root
+URL; loopback HTTP is accepted only for local verification. Expired snapshots are
+deleted automatically. Publishing is format-neutral; HWP, PDF, images, archives, and
+other regular files use the same delivery path.
 
 ## Operator approval bridge
 
 The optional bridge adds three tools for **Kernel legacy project identity adoption**:
 `request_operator_approval`, `get_operator_approval`, and `execute_approved_operation`.
-The enabled catalog contains 27 tools; the default catalog remains 24. Arbitrary
+The enabled catalog contains 28 tools; the default catalog remains 25. Arbitrary
 shell commands, identity data merges, deployments, and review overrides are outside
 this capability. See [the approval contract and operating steps](docs/operator-approval.md).
 

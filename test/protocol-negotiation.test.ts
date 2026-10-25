@@ -32,7 +32,7 @@ it("preserves installed SDK negotiation and rejects unsupported follow-up header
       const listing = await post("tools/list", {}, negotiated);
       expect(listing.status).toBe(200);
       const catalog = (await listing.json()).result.tools;
-      expect(catalog).toHaveLength(24);
+      expect(catalog).toHaveLength(25);
       expect(catalog.find((t: { name: string }) => t.name === "complete_work").inputSchema.properties.finalCheckpoint.properties.current.maxLength).toBe(2048);
     }
     const rejected = await post("tools/call", { name: "write_file", arguments: { path: "sentinel-side-effect", content: "sentinel-content" } }, "sentinel-unsupported-header");
