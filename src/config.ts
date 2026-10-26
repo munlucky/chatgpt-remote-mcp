@@ -1,6 +1,8 @@
 import path from "node:path";
 import os from "node:os";
 
+import { parseHostPathMappings, type HostExecutorConfig } from "./host-executor.js";
+
 export interface AppConfig {
   artifactTtlSeconds: number;
   artifactMaxBytes: number;
@@ -8,6 +10,7 @@ export interface AppConfig {
   operatorApprovalEnabled: boolean;
   operatorApprovalKey: string | undefined;
   operatorApprovalTtlSeconds: number;
+  hostExecutor: HostExecutorConfig;
   kernelHome: string;
   host: string;
   port: number;
@@ -223,6 +226,14 @@ export function loadConfig(
   }
   const operatorApprovalEnabled = parseBoolean(env.MCP_OPERATOR_APPROVAL_ENABLED, false);
   const operatorApprovalKey = env.MCP_OPERATOR_APPROVAL_KEY?.trim() || undefined;
+  const hostExecutorEnabled = parseBoolean(env.MCP_HOST_EXECUTOR_ENABLED, false);
+  const hostExecutorPathMappings = parseHostPathMappings(env.MCP_HOST_EXECUTOR_PATH_MAPPINGS);
+  const hostExecutorQueueDir = path.resolve(
+    env.MCP_HOST_EXECUTOR_QUEUE_DIR?.trim() || "/shared/.chatgpt-remote-mcp-host-exec",
+  );
+  if (hostExecutorEnabled && hostExecutorPathMappings.length === 0) {
+    throw new Error("MCP_HOST_EXECUTOR_PATH_MAPPINGS is required when MCP_HOST_EXECUTOR_ENABLED=true");
+  }
   if (operatorApprovalEnabled) {
     if (!operatorApprovalKey || operatorApprovalKey.length < 32 || operatorApprovalKey.length > 512) {
       throw new Error("MCP_OPERATOR_APPROVAL_KEY must contain 32 to 512 characters when operator approvals are enabled");
@@ -260,6 +271,18 @@ export function loadConfig(
     operatorApprovalEnabled,
     operatorApprovalKey,
     operatorApprovalTtlSeconds: parseInteger(env.MCP_OPERATOR_APPROVAL_TTL_SECONDS, 600, "MCP_OPERATOR_APPROVAL_TTL_SECONDS", 60, 3600),
+    hostExecutor: {
+      enabled: hostExecutorEnabled,
+      queueDir: hostExecutorQueueDir,
+      pathMappings: hostExecutorPathMappings,
+      heartbeatMaxAgeMs: parseInteger(
+        env.MCP_HOST_EXECUTOR_HEARTBEAT_MAX_AGE_MS,
+        5000,
+        "MCP_HOST_EXECUTOR_HEARTBEAT_MAX_AGE_MS",
+        1000,
+        60000,
+      ),
+    },
     kernelHome: path.resolve(env.MOON_RELAY_KERNEL_HOME?.trim() || path.join(os.homedir(), ".moon-relay-kernel")),
     probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
     usageLogDir: env.MCP_USAGE_LOG_DIR?.trim() || undefined,

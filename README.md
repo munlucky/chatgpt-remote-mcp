@@ -64,6 +64,38 @@ The MCP server publishes 25 tools, including bounded `read_files` batching, gene
 `publish_file` artifact delivery, and three durable continuity tools:
 `get_work_context`, `checkpoint_work`, and `complete_work`.
 
+### Native Windows host execution
+
+`exec_command` normally runs inside the Linux workmachine exactly as before. An
+optional `executionTarget=host` mode runs the same tracked command through a small
+native companion process on the Windows host. This is intended for tools that must
+execute in the real Windows environment, such as `powershell.exe`, a Windows virtual
+environment under `.venv\Scripts`, or Windows-only project verification scripts.
+There is no automatic WSL/Windows-executable fallback: callers must select `host`
+explicitly, and local execution receipts keep their existing identity contract.
+
+The feature is disabled by default. Set `MCP_HOST_EXECUTOR_ENABLED=true` in the
+ignored `.env` and deploy with `scripts/start.ps1`. The start/stop/status scripts
+manage the companion lifecycle and its heartbeat. Docker Compose derives the
+container-to-host path mappings from the existing `SHARED_PATH`, `HOST_USER_HOME`,
+and host mount aliases; do not hardcode a project path into commands. A stale or
+build-mismatched companion fails closed instead of silently falling back to Linux.
+
+The companion communicates only through its runtime queue beneath `SHARED_PATH` and
+uses the same managed-process bridge for polling, stdin, timeout, termination and
+durable `taskId`/`operationId` receipts. If the companion restarts while a claimed
+job is unresolved, that job is marked failed and is never replayed automatically.
+If its saved PID is still live, startup stops for inspection. A saved PID alone
+does not prove ownership, so recovery never terminates that process.
+Windows file-sharing conflicts during atomic JSON replacement are retried for at
+most three seconds. Persistent heartbeat or queue-write errors are logged and stop
+the companion; they do not authorize command replay or successful receipts.
+
+Enabling this feature expands `exec_command` from container permissions to the
+permissions of the Windows user running `scripts/start.ps1`. Enable it only on a host
+where the MCP authentication and shared-directory permissions are trusted. It is an
+execution boundary, not an OS sandbox or an approval mechanism.
+
 ### Published artifacts
 
 `publish_file` snapshots a regular file into process-scoped temporary storage and

@@ -217,3 +217,47 @@ describe("loadConfig", () => {
     ).toThrow("must not contain user credentials");
   });
 });
+
+describe("native host executor configuration", () => {
+  it("keeps host execution disabled unless explicitly enabled", () => {
+    expect(loadConfig({ MCP_AUTH_TOKEN: "secret" }, "/tmp").hostExecutor).toMatchObject({
+      enabled: false,
+      queueDir: "/shared/.chatgpt-remote-mcp-host-exec",
+      pathMappings: [],
+      heartbeatMaxAgeMs: 5000,
+    });
+  });
+
+  it("requires and parses explicit host path mappings when enabled", () => {
+    const config = loadConfig(
+      {
+        MCP_AUTH_TOKEN: "secret",
+        MCP_HOST_EXECUTOR_ENABLED: "true",
+        MCP_HOST_EXECUTOR_QUEUE_DIR: "/shared/runtime-host-exec",
+        MCP_HOST_EXECUTOR_PATH_MAPPINGS:
+          "/shared=C:/dev;/host/home=C:/Users/moon",
+        MCP_HOST_EXECUTOR_HEARTBEAT_MAX_AGE_MS: "7000",
+      },
+      "/tmp",
+    );
+    expect(config.hostExecutor).toMatchObject({
+      enabled: true,
+      queueDir: "/shared/runtime-host-exec",
+      heartbeatMaxAgeMs: 7000,
+      pathMappings: [
+        { containerRoot: "/host/home", hostRoot: "C:/Users/moon" },
+        { containerRoot: "/shared", hostRoot: "C:/dev" },
+      ],
+    });
+
+    expect(() =>
+      loadConfig(
+        {
+          MCP_AUTH_TOKEN: "secret",
+          MCP_HOST_EXECUTOR_ENABLED: "true",
+        },
+        "/tmp",
+      ),
+    ).toThrow("MCP_HOST_EXECUTOR_PATH_MAPPINGS is required");
+  });
+});

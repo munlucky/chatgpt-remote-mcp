@@ -10,6 +10,9 @@ $envFile = Join-Path $projectDir ".env"
 Write-Host "`n=== Container Status ===" -ForegroundColor Cyan
 docker compose --project-directory $projectDir -f (Join-Path $projectDir 'docker-compose.yml') ps
 
+Write-Host "`n=== Native Host Executor ===" -ForegroundColor Cyan
+& (Join-Path $scriptDir 'host-executor.ps1') -Action Status
+
 if (Test-Path $envFile) {
     $mcpUrlLine = Get-Content $envFile | Where-Object { $_ -match "^MCP_PUBLIC_URL=(.+)" }
     if ($mcpUrlLine -match "^MCP_PUBLIC_URL=(.+)") {

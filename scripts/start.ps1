@@ -27,6 +27,9 @@ if ($containerId) {
     docker compose exec -T workmachine node /opt/chatgpt-remote-mcp/scripts/live-probe.mjs --preflight
     if ($LASTEXITCODE -ne 0) { throw 'Active jobs or failed preflight; service retained' }
 }
+
+& (Join-Path $scriptDir 'host-executor.ps1') -Action Start -BuildId $env:MCP_BUILD_ID
+
 docker compose up -d --force-recreate
 if ($LASTEXITCODE -ne 0) { throw 'Container startup failed' }
 

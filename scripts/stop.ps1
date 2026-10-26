@@ -8,6 +8,8 @@ $projectDir = Split-Path -Parent $scriptDir
 
 Set-Location $projectDir
 
+& (Join-Path $scriptDir 'host-executor.ps1') -Action Stop
+
 Write-Host "Stopping ChatGPT Remote MCP containers..." -ForegroundColor Yellow
 docker compose down
 

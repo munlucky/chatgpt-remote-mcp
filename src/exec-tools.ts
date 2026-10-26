@@ -9,6 +9,11 @@ import { McpToolError } from "./errors.js";
 import type { ExecutionRecorder } from "./continuity/execution-recorder.js";
 import type { ExecutionRecord } from "./continuity/task-types.js";
 import { FileService } from "./file-service.js";
+import {
+  assertHostExecutorAvailable,
+  createHostExecutorJob,
+  mapContainerPathToHost,
+} from "./host-executor.js";
 import { ProcessManager } from "./process-manager.js";
 import { runScript } from "./script-runner.js";
 import { runTool, type SuccessResultFormatter } from "./tool-result.js";
@@ -289,23 +294,27 @@ export function registerExecTools(
     {
       title: "Execute command",
       description:
-        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Run an unrestricted shell command on the host with the service's full OS permissions. A successful start always returns a process session ID. By default the call waits ${config.defaultProcessYieldMs} ms, then returns status=accepted when work is still running; follow nextCall with read_process or write_stdin. Never use a new operationId to retry an uncertain execution.`,
+        `Read get_work_context before project work; use taskId+operationId to prevent duplicate execution. Tracking policy: ${config.executionTracking}. Run an unrestricted shell command in the workmachine by default; executionTarget=host uses the optional native host executor with the host user's OS permissions. A successful start always returns a process session ID. By default the call waits ${config.defaultProcessYieldMs} ms, then returns status=accepted when work is still running; follow nextCall with read_process or write_stdin. Never use a new operationId to retry an uncertain execution.`,
       inputSchema: {
         taskId: taskIdSchema,
         operationId: operationIdSchema,
         cmd: z.string().min(1).describe("Shell command or script to execute."),
+        executionTarget: z
+          .enum(["local", "host"])
+          .default("local")
+          .describe("Execution environment. local runs in the Linux workmachine; host uses the optional native host executor."),
         workdir: z
           .string()
           .optional()
-          .describe(`Working directory. Relative paths resolve from ${config.defaultCwd}.`),
+          .describe(`Working directory. Relative paths resolve from ${config.defaultCwd}; host execution maps the resolved path through MCP_HOST_EXECUTOR_PATH_MAPPINGS.`),
         shell: z
           .string()
           .optional()
-          .describe(`Shell executable. Defaults to ${config.defaultShell}.`),
+          .describe(`Shell executable. local defaults to ${config.defaultShell}; host defaults to the native agent shell (PowerShell on Windows).`),
         login: z
           .boolean()
           .default(true)
-          .describe("Use login-shell semantics (-lc) instead of -c."),
+          .describe("For POSIX shells, use login-shell semantics (-lc) instead of -c. PowerShell/cmd host execution ignores this flag."),
         env: environmentSchema,
         stdin: z.string().optional().describe("Initial text written to stdin after spawn."),
         timeoutMs: timeoutSchema,
@@ -327,6 +336,7 @@ export function registerExecTools(
       taskId,
       operationId,
       cmd,
+      executionTarget,
       workdir,
       shell,
       login,
@@ -340,13 +350,30 @@ export function registerExecTools(
         const cwd = fileService.resolve(".", workdir);
         const executable = shell || config.defaultShell;
         requireTrackingPair(taskId, operationId, config, cwd);
+
+        // Keep the local semantic input byte-for-byte compatible with existing
+        // execution receipts. Host-only fields are added only for host execution.
+        // Derived deployment state (agent heartbeat and path mappings) is deliberately
+        // excluded: replaying an existing receipt must not depend on current host state.
+        const semanticInput = executionTarget === "local"
+          ? { cmd, cwd, executable, login, env, stdin, timeoutMs }
+          : {
+              cmd,
+              cwd,
+              executionTarget: "host",
+              shell: shell || null,
+              login,
+              env,
+              stdin,
+              timeoutMs,
+            };
         const tracking = taskId && operationId
           ? await executionRecorder.prepare({
               taskId,
               operationId,
               cwd,
               toolKind: "exec_command",
-              semanticInput: { cmd, cwd, executable, login, env, stdin, timeoutMs },
+              semanticInput,
             })
           : undefined;
         if (tracking && !tracking.shouldSpawn) {
@@ -372,15 +399,34 @@ export function registerExecTools(
         }
 
         let sessionId: string;
+        let hostJobCleanup: (() => Promise<void>) | undefined;
         try {
+          let hostCwd: string | undefined;
+          if (executionTarget === "host") {
+            await assertHostExecutorAvailable(config.hostExecutor, config.buildId);
+            hostCwd = mapContainerPathToHost(cwd, config.hostExecutor.pathMappings);
+          }
+          const execution = executionTarget === "host"
+            ? await createHostExecutorJob(config.hostExecutor, {
+                command: cmd,
+                cwd: hostCwd!,
+                shell,
+                login,
+                env,
+              })
+            : undefined;
+          hostJobCleanup = execution?.cleanup;
           sessionId = processManager.start({
-            executable,
-            args: [login ? "-lc" : "-c", cmd],
-            commandForDisplay: cmd,
+            executable: execution ? process.execPath : executable,
+            args: execution
+              ? [execution.clientScript, execution.jobDir]
+              : [login ? "-lc" : "-c", cmd],
+            commandForDisplay: execution ? `[host] ${cmd}` : cmd,
             cwd,
-            env,
+            ...(execution ? {} : { env }),
             timeoutMs,
             stdin,
+            ...(execution ? { cleanup: execution.cleanup } : {}),
             ...(tracking
               ? {
                   tracking: { taskId: taskId!, operationId: operationId!, workspaceId: tracking.record.workspaceId },
@@ -390,7 +436,9 @@ export function registerExecTools(
                 }
               : {}),
           });
+          hostJobCleanup = undefined;
         } catch (error) {
+          await hostJobCleanup?.();
           if (tracking) await executionRecorder.markSpawnFailed(tracking.record);
           throw error;
         }
