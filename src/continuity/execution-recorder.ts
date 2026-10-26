@@ -47,7 +47,7 @@ export class ExecutionRecorder {
       if (task.status !== "active" || state.activeTaskId !== input.taskId) {
         throw new McpToolError("task_closed", `Task is not active: ${input.taskId}`);
       }
-      return this.store.withExecutionLock(input.operationId, async () => {
+      return this.store.withExecutionLock(identity.workspaceId, input.operationId, async () => {
         const existing = await this.store.readExecution(identity.workspaceId, input.operationId);
         if (existing) {
           if (
@@ -93,7 +93,7 @@ export class ExecutionRecorder {
   }
 
   async markRunning(record: ExecutionRecord, sessionId: string): Promise<ExecutionRecord> {
-    return this.store.withExecutionLock(record.operationId, async () => {
+    return this.store.withExecutionLock(record.workspaceId, record.operationId, async () => {
       const current = await this.require(record.workspaceId, record.operationId);
       if (current.state === "running" && current.sessionId === sessionId) return current;
       if (current.state !== "prepared") return current;
@@ -109,7 +109,7 @@ export class ExecutionRecorder {
   }
 
   async markSpawnFailed(record: ExecutionRecord, errorCode = "spawn_failed"): Promise<ExecutionRecord> {
-    return this.store.withExecutionLock(record.operationId, async () => {
+    return this.store.withExecutionLock(record.workspaceId, record.operationId, async () => {
       const current = await this.require(record.workspaceId, record.operationId);
       if (current.state !== "prepared") return current;
       const updated: ExecutionRecord = {
@@ -128,7 +128,7 @@ export class ExecutionRecorder {
     operationId: string,
     observation: ExecutionTerminalObservation,
   ): Promise<ExecutionRecord> {
-    return this.store.withExecutionLock(operationId, async () => {
+    return this.store.withExecutionLock(workspaceId, operationId, async () => {
       const current = await this.require(workspaceId, operationId);
       if (current.state === "exited" || current.state === "spawn_failed") return current;
       if (current.state === "unknown" && current.bootId !== this.store.bootId) return current;
@@ -153,7 +153,7 @@ export class ExecutionRecorder {
     workspaceId: string,
     operationId: string,
   ): Promise<void> {
-    await this.store.withExecutionLock(operationId, async () => {
+    await this.store.withExecutionLock(workspaceId, operationId, async () => {
       const current = await this.store.readExecution(workspaceId, operationId);
       if (!current) return;
       try {
@@ -169,7 +169,7 @@ export class ExecutionRecorder {
     taskId: string,
     reconciliation: NonNullable<ExecutionRecord["callerResolution"]>,
   ): Promise<void> {
-    await this.store.withExecutionLock(reconciliation.operationId, async () => {
+    await this.store.withExecutionLock(workspaceId, reconciliation.operationId, async () => {
       const current = await this.require(workspaceId, reconciliation.operationId);
       if (current.taskId !== taskId) {
         throw new McpToolError("workspace_mismatch", "Execution does not belong to the selected task");
@@ -205,7 +205,7 @@ export class ExecutionRecorder {
     const lockNext = async (index: number): Promise<T> => {
       if (index === ordered.length) return commit(records);
       const reconciliation = ordered[index]!;
-      return this.store.withExecutionLock(reconciliation.operationId, async () => {
+      return this.store.withExecutionLock(workspaceId, reconciliation.operationId, async () => {
         const current = await this.require(workspaceId, reconciliation.operationId);
         if (current.taskId !== taskId) throw new McpToolError("workspace_mismatch", "Execution does not belong to the selected task");
         if (current.state !== "unknown") throw new McpToolError("idempotency_conflict", "Only unknown executions can be reconciled");

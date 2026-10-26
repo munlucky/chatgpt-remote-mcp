@@ -84,9 +84,11 @@ export async function startHttpServer(
     }
     const requestId = randomUUID();
     const startedAt = performance.now();
+    const responseAbort = new AbortController();
     const userAgent = request.get("user-agent") || "";
     const metrics: RequestMetrics = {
       requestId, setupMs: null, toolMs: null, toolError: null,
+      signal: responseAbort.signal,
       clientClass: userAgent.includes("Codex") ? "codex" : userAgent.includes("openai-mcp") ? "openai_mcp" : "other",
     };
     let responseBytes = 0;
@@ -116,6 +118,7 @@ export async function startHttpServer(
           schemaVersion: 2, bootId: services.continuityService.store.bootId,
           correlation: metrics.correlation ?? correlation({ unlinkedReason: metrics.toolName ? "not_selected" : "not_applicable" }),
           ...(metrics.processRead ? { processRead: metrics.processRead } : {}),
+          ...(metrics.continuity ? { continuity: metrics.continuity } : {}),
           timestamp: new Date().toISOString(),
           buildId: config.buildId || "unknown",
           trafficClass: response.locals.authenticatedMcp === true && config.probeSecret
@@ -148,6 +151,7 @@ export async function startHttpServer(
     response.once("finish", () => logCompletion("completed"));
     response.once("close", () => {
       if (!response.writableEnded) {
+        responseAbort.abort();
         logCompletion("aborted");
       }
     });
@@ -235,6 +239,7 @@ export async function startHttpServer(
       service: "chatgpt-remote-mcp",
       version: "0.1.0",
       transportMode: "stateless-json",
+      processSettings: { defaultYieldMs: config.defaultProcessYieldMs, readWaitMaxMs: config.processReadWaitMaxMs },
       activeMcpSessions: 0,
       activeMcpRequests,
       peakActiveMcpRequests,

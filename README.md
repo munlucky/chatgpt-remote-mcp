@@ -169,7 +169,8 @@ file edits, stdin writes, or external effects retried under a different operatio
 
 Process start, polling, stdin and termination responses preserve the tracked task and
 operation IDs, receipt state and persistence state in both text and structured results.
-`nextCall` supplies `read_process` with the returned `nextSeq` and a 16 KiB output limit.
+`nextCall` supplies `read_process` with the returned `nextSeq`. Explicit read calls
+preserve their wait mode, wait budget and output limit across continuation calls.
 
 Successful process exit needs no automatic `get_work_context` call when all output
 is drained, exitCode is zero, there is no signal or timeout, and the durable receipt
@@ -182,6 +183,26 @@ overrides it. `read_process` accepts `waitMode=output` (default: return on new o
 or exit) and `waitMode=terminal` (wait for exit or `waitMs`, ignoring output wakeups).
 Both modes preserve output limits and `nextSeq`. A wait budget or HTTP disconnect
 does not terminate the process. Waiting settings do not change operation identity.
+
+`MCP_PROCESS_READ_WAIT_MAX_MS` caps each read wait at 60000 ms by default
+(configuration range: 1000–300000). The wire `waitMs` range remains 0–300000.
+The response deadline starts at handler entry and allows the effective wait plus
+5000 ms for receipt verification. A zero wait or `drainOnly=true` still has this
+5000 ms verification budget. `persistenceVerification=pending` means a terminal
+result is observed but its durable receipt is not yet verified. Follow the same
+session's `nextCall`; do not start another execution. Receipt `persistenceState`
+keeps its existing `ok`/`degraded` values. Authenticated `/diagnostics` exposes
+the effective yield and read cap in `processSettings`.
+
+When `hasMore=true`, follow `nextCall` with `drainOnly=true`. This makes only that
+read immediate. The next continuation restores the original wait when output is
+drained and the process still runs. Execute the supplied arguments unchanged.
+If a session expires, `read_process` can accept its original `taskId` and
+`operationId` together. It returns a matching current-boot receipt with
+`outputAvailability=unavailable`; this does not prove that all output was read.
+Use `get_work_context` for earlier boots or uncertain execution state. Never
+restart an execution to recover missing output. Context responses expose total
+unsettled counts and a task-bound `nextCursor`; supply it as `cursor` for the next page.
 
 After `npm run build`, run `node scripts/execution-benchmark.mjs --terminal` for a
 fixed local workload and per-setting polling, latency, output and deduplication data.

@@ -128,8 +128,9 @@ export function parseExecution(raw: string, file: string): ExecutionRecord {
   return { ...record, schemaVersion: 2 } as ExecutionRecord;
 }
 
-export function validateOwnership(state: WorkspaceState, records: ExecutionRecord[], file: string): void {
-  const byId = new Map(records.map((record) => [record.operationId, record]));
+export function validateOwnership(state: WorkspaceState, records: ExecutionRecord[], file: string,
+  owners?: Pick<ReadonlyMap<string, Pick<ExecutionRecord, "taskId">>, "get">): void {
+  const byId = owners ?? new Map(records.map((record) => [record.operationId, record]));
   for (const record of records) {
     if (record.workspaceId !== state.workspace.workspaceId || !Object.hasOwn(state.tasks, record.taskId)) return corrupt(file);
     for (const ref of record.callerResolution?.evidenceRefs ?? []) {

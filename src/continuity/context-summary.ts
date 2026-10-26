@@ -20,6 +20,9 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
     unsettled: Record<string, unknown>[];
     recent: Record<string, unknown>[];
     total?: number;
+    unsettledTotal?: number;
+    runningTotal?: number;
+    nextCursor?: string | null;
   };
   const execution = (record: Record<string, unknown>) => ({
     operationId: record.operationId,
@@ -34,6 +37,8 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
     errorCode: record.errorCode,
     callerResolution: (record.callerResolution as { resolution?: string } | undefined)?.resolution,
   });
+  if ((executions.unsettledTotal ?? 0) > executions.unsettled.length) omitted.unsettledExecutions = executions.unsettledTotal! - executions.unsettled.length;
+  if ((executions.runningTotal ?? 0) > executions.running.length) omitted.runningExecutions = executions.runningTotal! - executions.running.length;
   const summary: Record<string, unknown> = {
     ...context,
     format: "summary",
@@ -62,7 +67,8 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
     } } : {}),
     executions: {
       total: executions.total ?? 0,
-      counts: { running: executions.running.length, unsettled: executions.unsettled.length, recentReturned: Math.min(executions.recent.length, 5) },
+      nextCursor: executions.nextCursor ?? null,
+      counts: { running: executions.runningTotal ?? executions.running.length, unsettled: executions.unsettledTotal ?? executions.unsettled.length, recentReturned: Math.min(executions.recent.length, 5) },
       running: items(executions.running, "runningExecutions", 10).map(execution),
       unsettled: items(executions.unsettled, "unsettledExecutions", 10).map(execution),
       recent: items(executions.recent, "recentExecutions", 5).map(execution),
@@ -88,7 +94,7 @@ export function summarizeContext(context: Record<string, unknown>, maxBytes: num
       format: "summary",
       selection: context.selection,
       task: task ? { taskId: task.taskId, status: task.status, revision: task.revision } : null,
-      executions: { total: executions.total ?? 0, counts: (summary.executions as Record<string, unknown>).counts },
+      executions: { total: executions.total ?? 0, counts: (summary.executions as Record<string, unknown>).counts, nextCursor: executions.nextCursor ?? null },
       drift: context.drift,
       evidence: context.evidence,
       warnings: context.warnings,

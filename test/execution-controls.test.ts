@@ -32,7 +32,11 @@ it("terminal waits ignore output, honor budgets and keep bounded cursor reads", 
       output += result.output;
     }
     expect(output).toBe("a".repeat(40000)+"end");
-    const budget = await manager.read(start(500), { waitMs: 100, waitMode: "terminal" });
+    const budgetSession = start(500);
+    // Process startup can exceed 100 ms on a loaded host. Establish output
+    // readiness before testing that terminal mode ignores its notification.
+    await manager.read(budgetSession, {waitMs:2000,waitMode:"output"});
+    const budget = await manager.read(budgetSession, { waitMs: 100, waitMode: "terminal" });
     expect(budget.running).toBe(true);
     expect(budget.output.length).toBeGreaterThan(0);
   } finally { await manager.shutdown(); }

@@ -47,9 +47,10 @@ export async function runTool(
   const started = performance.now();
   try {
     const data = await operation();
-    if (metrics && typeof data.running === "boolean" && typeof data.output === "string") {
-      metrics.processRead = { running: data.running, hasMore: data.hasMore === true,
-        outputBytes: Buffer.byteLength(data.output), droppedOutputBytes: Number(data.droppedOutputBytes) || 0 };
+    if (metrics && typeof data.running === "boolean") {
+      metrics.processRead = { running: data.running, ...(typeof data.hasMore === "boolean" ? {hasMore:data.hasMore} : {}),
+        ...(typeof data.output === "string" ? {outputBytes:Buffer.byteLength(data.output),droppedOutputBytes:Number(data.droppedOutputBytes)||0} : {}),
+        ...Object.fromEntries(["waitMode","requestedWaitMs","effectiveWaitMs","drainOnly","requestedAfterSeq","nextSeq","responseElapsedMs","responseBudgetMs","responseDeadlineExceeded","persistenceVerification","persistenceState","outputAvailability"].filter(key => data[key] !== undefined).map(key=>[key,data[key]])) };
     }
     const result = successResult(data, formatter);
     if (metrics) metrics.toolError = false;

@@ -1,3 +1,4 @@
+import { countContinuity, measureContinuity } from "./metrics.js";
 import { open, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -5,7 +6,7 @@ import path from "node:path";
 export async function syncDirectory(directory: string): Promise<void> {
   try {
     const handle = await open(directory, "r");
-    try { await handle.sync(); } finally { await handle.close(); }
+    try { countContinuity("syncCalls"); await measureContinuity("durabilityMs", () => handle.sync()); } finally { await handle.close(); }
   } catch (error) {
     // Windows does not expose directory fsync through Node. File fsync and
     // rename remain available; power-loss durability is limited on that host.
@@ -24,7 +25,7 @@ export async function removeDurably(file: string): Promise<void> {
 export async function syncFileAndParents(file: string, boundary: string): Promise<void> {
   // Windows FlushFileBuffers requires a writable handle; r+ never truncates.
   const handle = await open(file, "r+");
-  try { await handle.sync(); } finally { await handle.close(); }
+  try { countContinuity("syncCalls"); await measureContinuity("durabilityMs", () => handle.sync()); } finally { await handle.close(); }
   const stop = path.resolve(boundary);
   let directory = path.dirname(path.resolve(file));
   for (;;) {

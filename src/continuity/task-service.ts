@@ -1,3 +1,4 @@
+import { measureContinuity } from "./metrics.js";
 import { bindRequest } from "../telemetry-correlation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
@@ -342,6 +343,7 @@ export class TaskContinuityService {
     taskId?: string | undefined;
     recentExecutionLimit?: number | undefined;
     candidateLimit?: number | undefined;
+    cursor?: string | undefined;
     format?: "summary" | "full" | undefined;
   }): Promise<Record<string, unknown>> {
     const context = await this.readContext(input, input.format === "summary");
@@ -353,6 +355,7 @@ export class TaskContinuityService {
     taskId?: string | undefined;
     recentExecutionLimit?: number | undefined;
     candidateLimit?: number | undefined;
+    cursor?: string | undefined;
   }, compact = false): Promise<Record<string, unknown>> {
     await this.initialize();
     let selected: SelectedTask | null = null;
@@ -424,20 +427,15 @@ export class TaskContinuityService {
     bindRequest({ workspaceId: state.workspace.workspaceId, taskId: task.taskId });
     const current = await observeWorkspace(state.workspace, this.options.snapshotLimits);
     const comparison = compareWorkspace(task.lastObservedWorkspace, current);
-    const allExecutions = await this.store.listExecutions(state.workspace.workspaceId, task.taskId);
     const recentLimit = Math.max(
       1,
       Math.min(input.recentExecutionLimit ?? this.options.recentExecutionLimit, 50),
     );
-    const running = allExecutions.filter((record) => record.state === "running").map(executionView);
-    const unsettled = allExecutions
-      .filter((record) => record.state === "prepared" || record.state === "running" || record.state === "unknown")
-      .map(executionView);
-    let recent = allExecutions
-      .filter((record) => record.state === "exited" || record.state === "spawn_failed")
-      .slice(0, recentLimit)
-      .map(executionView);
-    const evidence = await this.verifyEvidence(state.workspace, task.checkpoint.evidenceRefs, allExecutions, comparison.evidence);
+    const executionPage = await this.store.executionContext(state.workspace.workspaceId, task.taskId, compact ? Math.min(recentLimit,5) : recentLimit, input.cursor, compact ? 10 : 50);
+    const running = executionPage.unsettled.filter(record => record.state === "running").map(executionView);
+    const unsettled = executionPage.unsettled.map(executionView);
+    let recent = executionPage.recent.map(executionView);
+    const evidence = await measureContinuity("evidenceMs", () => this.verifyEvidence(state.workspace, task.taskId, task.checkpoint.evidenceRefs, comparison.evidence));
 
     const response: Record<string, unknown> = {
       selection: "selected",
@@ -465,7 +463,10 @@ export class TaskContinuityService {
         running,
         unsettled,
         recent,
-        total: allExecutions.length,
+        total: executionPage.total,
+        unsettledTotal: executionPage.unsettledTotal,
+        runningTotal: executionPage.runningTotal,
+        nextCursor: executionPage.nextCursor,
       },
       evidence,
       resume: "context_available",
@@ -473,10 +474,10 @@ export class TaskContinuityService {
         omittedCounts: {
           recentExecutions: Math.max(
             0,
-            allExecutions.filter((record) => record.state === "exited" || record.state === "spawn_failed").length - recent.length,
+            executionPage.terminalTotal - recent.length,
           ),
         },
-        nextCursor: null,
+        nextCursor: executionPage.nextCursor,
         perSectionErrors: [],
       },
     };
@@ -488,7 +489,7 @@ export class TaskContinuityService {
       recent = recent.slice(0, -1);
       (response.executions as Record<string, unknown>).recent = recent;
       ((response.truncation as Record<string, unknown>).omittedCounts as Record<string, number>).recentExecutions =
-        allExecutions.filter((record) => record.state === "exited" || record.state === "spawn_failed").length - recent.length;
+        executionPage.terminalTotal - recent.length;
     }
     if (Buffer.byteLength(JSON.stringify(response)) > this.options.contextMaxBytes) {
       const taskView = response.task as Record<string, unknown>;
@@ -506,16 +507,18 @@ export class TaskContinuityService {
 
   private async verifyEvidence(
     identity: WorkspaceIdentityRecord,
+    taskId: string,
     refs: EvidenceRef[],
-    executions: ExecutionRecord[],
     fallback: "present" | "changed" | "unchecked",
   ): Promise<"present" | "missing" | "changed" | "unchecked"> {
     if (refs.length === 0) return fallback;
     let unchecked = false;
-    const executionIds = new Set(executions.map((record) => record.operationId));
     for (const ref of refs.slice(0, 50)) {
       if (ref.kind === "receipt") {
-        if (!ref.operationId || !executionIds.has(ref.operationId)) return "missing";
+        if (!ref.operationId) return "missing";
+        const receipt = await this.store.readExecution(identity.workspaceId, ref.operationId);
+        if (!receipt) return "missing";
+        if (receipt.taskId !== taskId) throw new McpToolError("state_corrupt", "Evidence receipt ownership mismatch");
         continue;
       }
       if (!ref.path || !ref.sha256) {
@@ -573,7 +576,7 @@ export class TaskContinuityService {
   }
 
   private async requireTask(taskId: string): Promise<SelectedTask> {
-    const found = await this.store.findTask(taskId);
+    const found = await measureContinuity("taskLookupMs", () => this.store.findTask(taskId));
     if (!found) throw new McpToolError("unknown_task", `Unknown task: ${taskId}`);
     const task = found.state.tasks[taskId];
     if (!task) throw new McpToolError("state_corrupt", `Task index is inconsistent: ${taskId}`);

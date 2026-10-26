@@ -1,3 +1,4 @@
+import { countContinuity, measureContinuity, measureOwnership } from "./metrics.js";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { open, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,10 +12,14 @@ import {
   type WorkspaceIdentityRecord,
   type WorkspaceState,
 } from "./task-types.js";
-import { parseExecution, parseWorkspace as parseState, validateOwnership } from "./storage-schema.js";
+import { parseExecution, parseWorkspace as parseState, validateOwnership as validateOwnershipRaw } from "./storage-schema.js";
 import { migrateWorkspace, restoreV1Workspace, workspaceFiles, validateWorkspaceFiles } from "./storage-migration.js";
 import { commitJournal, prepareJournal, recoverJournals, journalBytes } from "./storage-journal.js";
 import { syncDirectory, syncFileAndParents } from "./storage-durability.js";
+
+import { WorkspaceExecutionIndex } from "./execution-index.js";
+
+const validateOwnership: typeof validateOwnershipRaw = (...args) => measureOwnership(() => validateOwnershipRaw(...args));
 
 export interface TaskStoreOptions {
   stateDirectory: string;
@@ -51,6 +56,7 @@ export class TaskStore {
   readonly #ownerId = randomUUID();
   readonly #workspaceQueues = new Map<string, Promise<void>>();
   readonly #executionQueues = new Map<string, Promise<void>>();
+  readonly #indexes = new Map<string, WorkspaceExecutionIndex>();
   readonly #storageQueue = new Map<string, Promise<void>>();
   #initialized = false;
   #initializing: Promise<void> | undefined;
@@ -102,6 +108,7 @@ export class TaskStore {
           await migrateWorkspace(this.#workspaceDirectory(workspaceId), workspaceId, (file, body, mode) => this.#atomicWrite(file, body, mode));
         }
         await this.#recoverPreviousBootExecutions();
+        for (const workspaceId of await this.#workspaceIds()) await this.#rebuildIndex(workspaceId);
         this.#initialized = true;
       } catch (error) {
         await this.close().catch(() => undefined);
@@ -133,6 +140,7 @@ export class TaskStore {
     }
     this.#writerGuardHeld = false;
     this.#initialized = false;
+    this.#indexes.clear();
   }
 
   async inputHmac(value: unknown): Promise<string> {
@@ -142,14 +150,24 @@ export class TaskStore {
       .digest("hex");
   }
 
+  // Explicit full integrity boundary. Normal reads must still validate selected owners.
+  async integrityScan(workspaceId?: string): Promise<void> {
+    return this.#withStorageLock(async () => {
+      for (const id of workspaceId ? [workspaceId] : await this.#workspaceIds()) {
+        this.#indexes.delete(id);
+        await this.#rebuildIndex(id);
+      }
+    });
+  }
+
   async withWorkspaceLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
     await this.initialize();
     return this.#serialize(this.#workspaceQueues, workspaceId, operation);
   }
 
-  async withExecutionLock<T>(operationId: string, operation: () => Promise<T>): Promise<T> {
+  async withExecutionLock<T>(workspaceId: string, operationId: string, operation: () => Promise<T>): Promise<T> {
     await this.initialize();
-    return this.#serialize(this.#executionQueues, operationId, operation);
+    return this.#serialize(this.#executionQueues, `${workspaceId}:${operationId}`, operation);
   }
 
   async readWorkspace(identity: WorkspaceIdentityRecord): Promise<WorkspaceState> {
@@ -160,7 +178,7 @@ export class TaskStore {
         if (state.workspace.workspaceId !== identity.workspaceId) {
           throw new McpToolError("workspace_mismatch", "Stored workspace identity does not match requested workspace");
         }
-        validateOwnership(state, await this.#executionRecords(identity.workspaceId), file);
+        await this.#validateSelected(state, [], await this.#index(identity.workspaceId), file);
         // Confirm snapshot durability before callers return a dedupe result.
         await syncFileAndParents(file, this.#options.stateDirectory);
         return state;
@@ -192,6 +210,9 @@ export class TaskStore {
       const directory = this.#workspaceDirectory(state.workspace.workspaceId);
       await mkdir(path.join(directory, "executions"), { recursive: true, mode: 0o700 });
       await this.#atomicWrite(this.#statePath(state.workspace.workspaceId), body, 0o600);
+      const index = await this.#index(state.workspace.workspaceId);
+      index.tasks.clear();
+      for (const id of Object.keys(parsed.tasks)) index.tasks.add(id);
     });
   }
 
@@ -219,6 +240,7 @@ export class TaskStore {
         this.#recoveryRequired = true;
         throw error;
       } finally {
+        this.#indexes.delete(state.workspace.workspaceId);
         this.#bytesUsed = await this.#measureBytes(this.#options.stateDirectory);
       }
     });
@@ -231,7 +253,12 @@ export class TaskStore {
   async #recoverTransactionsLocked(): Promise<void> {
     for (const workspaceId of await this.#workspaceIds()) {
       await recoverJournals(this.#workspaceDirectory(workspaceId), workspaceId,
-        (file, body, mode) => this.#atomicWrite(file, body, mode));
+        (file, body, mode) => {
+          // Failed commits already discarded their workspace index. Recovery
+          // writes must not discard unrelated workspace indexes.
+          this.#indexes.delete(workspaceId);
+          return this.#atomicWrite(file, body, mode);
+        });
     }
     this.#recoveryRequired = false;
     this.#bytesUsed = await this.#measureBytes(this.#options.stateDirectory);
@@ -263,10 +290,13 @@ export class TaskStore {
   async findTask(taskId: string): Promise<{ state: WorkspaceState; taskId: string } | null> {
     return this.#withStorageLock(async () => {
       for (const workspaceId of await this.#workspaceIds()) {
+        const index = await this.#index(workspaceId);
+        if (!index.tasks.has(taskId)) continue;
         const file = this.#statePath(workspaceId);
         try {
           const state = parseState(await readFile(file, "utf8"), file);
-          validateOwnership(state, await this.#executionRecords(workspaceId), file);
+          if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
+          await this.#validateSelected(state, [], await this.#index(workspaceId), file);
           await syncFileAndParents(file, this.#options.stateDirectory);
           if (state.tasks[taskId]) return { state, taskId };
         } catch (error) {
@@ -288,7 +318,8 @@ export class TaskStore {
       for (const workspaceId of workspaceIds) {
         const file = this.#statePath(workspaceId);
         const state = parseState(await readFile(file, "utf8"), file);
-        validateOwnership(state, await this.#executionRecords(workspaceId), file);
+        if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
+        await this.#validateSelected(state, [], await this.#index(workspaceId), file);
         if (!state.activeTaskId) continue;
         await syncFileAndParents(file, this.#options.stateDirectory);
         const task = state.tasks[state.activeTaskId];
@@ -308,22 +339,73 @@ export class TaskStore {
     });
   }
 
+  async #rawExecution(workspaceId: string, operationId: string): Promise<ExecutionRecord | null> {
+    const file = this.#executionPath(workspaceId, operationId);
+    let raw: string;
+    try {
+      countContinuity("receiptReads");
+      raw = await measureContinuity("receiptReadMs", () => readFile(file, "utf8"));
+    } catch (error) { if (isErrno(error, "ENOENT")) return null; throw error; }
+    const record = parseExecution(raw, file);
+    if (record.workspaceId !== workspaceId || record.operationId !== operationId) {
+      throw new McpToolError("state_corrupt", "Execution record ownership mismatch");
+    }
+    await syncFileAndParents(file, this.#options.stateDirectory);
+    return record;
+  }
+
+  async #validateSelected(state: WorkspaceState, selected: ExecutionRecord[], index: WorkspaceExecutionIndex, file: string): Promise<void> {
+    const missing = new Set<string>();
+    const records = new Map(selected.map(record => [record.operationId, record]));
+    const refs = new Set<string>();
+    for (const task of Object.values(state.tasks)) {
+      for (const entry of task.checkpoint.executionReconciliations ?? []) refs.add(entry.operationId);
+      for (const ref of [...task.checkpoint.evidenceRefs, ...(task.checkpoint.executionReconciliations ?? []).flatMap(entry => entry.evidenceRefs)]) {
+        if (ref.kind === "receipt" && ref.operationId) refs.add(ref.operationId);
+      }
+    }
+    for (const record of selected) for (const ref of record.callerResolution?.evidenceRefs ?? []) {
+      if (ref.kind === "receipt" && ref.operationId) refs.add(ref.operationId);
+    }
+    for (const id of refs) if (!records.has(id)) {
+      const record = await this.#rawExecution(state.workspace.workspaceId, id);
+      if (record) records.set(id, record); else missing.add(id);
+    }
+    const owners = {get:(id:string) => missing.has(id) ? undefined : records.get(id) ?? index.byOperation.get(id)};
+    validateOwnership(state, [...records.values()], file, owners);
+  }
+
+  async #rebuildIndex(workspaceId: string): Promise<WorkspaceExecutionIndex> {
+    countContinuity("indexRebuilds");
+    const files = await workspaceFiles(this.#workspaceDirectory(workspaceId));
+    const state = validateWorkspaceFiles(files, workspaceId);
+    const index = new WorkspaceExecutionIndex();
+    for (const file of files) if (file.path.startsWith("executions/")) index.publish(parseExecution(file.raw, file.path));
+    for (const id of Object.keys(state?.tasks ?? {})) index.tasks.add(id);
+    this.#indexes.set(workspaceId, index);
+    return index;
+  }
+
+  async #index(workspaceId: string): Promise<WorkspaceExecutionIndex> {
+    const index = this.#indexes.get(workspaceId);
+    if (index) { countContinuity("indexHits"); return index; }
+    return this.#rebuildIndex(workspaceId);
+  }
+
+  async invalidateWorkspace(workspaceId: string): Promise<void> {
+    return this.#withStorageLock(async () => { this.#workspaceDirectory(workspaceId); this.#indexes.delete(workspaceId); countContinuity("indexInvalidations"); });
+  }
+
   async readExecution(workspaceId: string, operationId: string): Promise<ExecutionRecord | null> {
     return this.#withStorageLock(async () => {
-      const file = this.#executionPath(workspaceId, operationId);
-      try {
-        const record = parseExecution(await readFile(file, "utf8"), file);
-        if (record.workspaceId !== workspaceId || record.operationId !== operationId) {
-          throw new McpToolError("state_corrupt", "Execution record ownership mismatch");
-        }
-        const state = parseState(await readFile(this.#statePath(workspaceId), "utf8"), this.#statePath(workspaceId));
-        validateOwnership(state, await this.#executionRecords(workspaceId), file);
-        await syncFileAndParents(file, this.#options.stateDirectory);
-        return record;
-      } catch (error) {
-        if (isErrno(error, "ENOENT")) return null;
-        throw error;
-      }
+      const index = await this.#index(workspaceId);
+      const record = await this.#rawExecution(workspaceId, operationId);
+      if (!record) return null;
+      const file = this.#statePath(workspaceId);
+      const state = parseState(await readFile(file, "utf8"), file);
+      if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
+      await this.#validateSelected(state, [record], index, file);
+      return record;
     });
   }
 
@@ -340,38 +422,54 @@ export class TaskStore {
         `${JSON.stringify(record, null, 2)}\n`,
         0o600,
       );
+      (await this.#index(record.workspaceId)).publish(parsed);
     });
+  }
+
+  async #selectedExecutions(workspaceId: string, taskId: string, ids: string[], index: WorkspaceExecutionIndex): Promise<ExecutionRecord[]> {
+    const file = this.#statePath(workspaceId);
+    const state = parseState(await readFile(file, "utf8"), file);
+    if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
+    const records: ExecutionRecord[] = [];
+    for (const id of ids) {
+      const record = await this.#rawExecution(workspaceId, id);
+      if (!record || record.taskId !== taskId) throw new McpToolError("state_corrupt", "Selected execution ownership mismatch");
+      records.push(record);
+    }
+    await this.#validateSelected(state, records, index, file);
+    await syncFileAndParents(file, this.#options.stateDirectory);
+    return records;
   }
 
   async listExecutions(workspaceId: string, taskId: string): Promise<ExecutionRecord[]> {
     return this.#withStorageLock(async () => {
-      const directory = path.join(this.#workspaceDirectory(workspaceId), "executions");
-      let entries;
-      try {
-        entries = await readdir(directory, { withFileTypes: true });
-      } catch (error) {
-        if (isErrno(error, "ENOENT")) return [];
-        throw error;
+      const index = await this.#index(workspaceId);
+      return this.#selectedExecutions(workspaceId, taskId, index.task(taskId).map(record => record.operationId), index);
+    });
+  }
+
+  async executionContext(workspaceId: string, taskId: string, recentLimit: number, cursor?: string, pageSize = 50) {
+    return this.#withStorageLock(async () => {
+      const index = await this.#index(workspaceId);
+      const all = index.task(taskId);
+      const terminal = all.filter(record => record.state === "exited" || record.state === "spawn_failed");
+      const unsettled = all.filter(record => record.state !== "exited" && record.state !== "spawn_failed");
+      let offset = 0;
+      if (cursor) {
+        // Cursor is task-bound and names an existing last item; no arbitrary offset or cross-task reuse.
+        const match = /^([0-9a-f-]{36}):([0-9a-f-]{36})$/i.exec(cursor);
+        if (!match || match[1] !== taskId) throw new McpToolError("invalid_input", "Invalid execution cursor");
+        const previous = unsettled.findIndex(record => record.operationId === match[2]);
+        if (previous < 0) throw new McpToolError("invalid_input", "Execution cursor is stale");
+        offset = previous + 1;
       }
-      const records: ExecutionRecord[] = [];
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-        const file = path.join(directory, entry.name);
-        const record = parseExecution(await readFile(file, "utf8"), file);
-        if (record.workspaceId !== workspaceId || entry.name !== `${record.operationId}.json`) {
-          throw new McpToolError("state_corrupt", "Execution ownership mismatch");
-        }
-        records.push(record);
-        await syncFileAndParents(file, this.#options.stateDirectory);
-      }
-      const snapshotFile = this.#statePath(workspaceId);
-      const state = parseState(await readFile(snapshotFile, "utf8"), snapshotFile);
-      validateWorkspaceFiles([
-        { path: "state.json", raw: JSON.stringify(state) },
-        ...records.map((record) => ({ path: `executions/${record.operationId}.json`, raw: JSON.stringify(record) })),
-      ], workspaceId);
-      await syncFileAndParents(snapshotFile, this.#options.stateDirectory);
-      return records.filter((record) => record.taskId === taskId).sort((a, b) => b.preparedAt.localeCompare(a.preparedAt));
+      const page = unsettled.slice(offset, offset + pageSize);
+      const ids = [...page, ...terminal.slice(0, recentLimit)].map(record => record.operationId);
+      const records = await this.#selectedExecutions(workspaceId, taskId, ids, index);
+      return { total:all.length, terminalTotal:terminal.length, unsettledTotal:unsettled.length,
+        runningTotal:all.filter(record => record.state === "running").length,
+        unsettled:records.slice(0,page.length), recent:records.slice(page.length),
+        nextCursor:offset+page.length < unsettled.length ? `${taskId}:${page.at(-1)!.operationId}` : null };
     });
   }
 
@@ -470,7 +568,8 @@ export class TaskStore {
         const handle = await open(file, "wx", 0o600);
         try {
           await handle.writeFile(`${JSON.stringify(payload)}\n`);
-          await handle.sync();
+          countContinuity("syncCalls");
+          await measureContinuity("durabilityMs", () => handle.sync());
         } finally {
           await handle.close();
         }
@@ -516,7 +615,8 @@ export class TaskStore {
       for (const entry of entries) {
         if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
         const file = path.join(directory, entry.name);
-        const record = parseExecution(await readFile(file, "utf8"), file);
+        countContinuity("receiptReads");
+        const record = parseExecution(await measureContinuity("receiptReadMs", () => readFile(file, "utf8")), file);
         if ((record.state === "prepared" || record.state === "running") && record.bootId !== this.#bootId) {
           record.state = "unknown";
           record.endedAt = record.endedAt ?? new Date().toISOString();
@@ -528,6 +628,7 @@ export class TaskStore {
   }
 
   async #atomicWrite(file: string, body: string, mode: number): Promise<void> {
+    const persistenceStarted = performance.now();
     const bytes = Buffer.byteLength(body);
     if (path.basename(file) === "state.json" && bytes > this.#options.maxSnapshotBytes) {
       throw new McpToolError("storage_full", "Workspace continuity snapshot exceeds its storage budget");
@@ -548,7 +649,8 @@ export class TaskStore {
       const handle = await open(temporary, "wx", mode);
       try {
         await handle.writeFile(body);
-        await handle.sync();
+        countContinuity("syncCalls");
+        await measureContinuity("durabilityMs", () => handle.sync());
       } finally {
         await handle.close();
       }
@@ -565,6 +667,8 @@ export class TaskStore {
       }
     } catch (error) {
       this.#failedWrites += 1;
+      const relative = path.relative(this.#workspacesDirectory(), file).split(path.sep);
+      if (/^[a-f0-9]{32}$/.test(relative[0] ?? "")) this.#indexes.delete(relative[0]!);
       await rm(temporary, { force: true }).catch(() => undefined);
       if (isErrno(error, "ENOSPC")) {
         throw new McpToolError("storage_full", "Continuity storage device is full");
@@ -574,6 +678,7 @@ export class TaskStore {
       }
       throw error;
     } finally {
+      countContinuity("persistenceMs", performance.now() - persistenceStarted);
       this.#pendingWrites = Math.max(0, this.#pendingWrites - 1);
     }
   }

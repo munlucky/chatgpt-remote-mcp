@@ -1,3 +1,4 @@
+import { countContinuity, measureContinuity } from "./metrics.js";
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -41,7 +42,8 @@ export async function workspaceFiles(directory: string): Promise<Array<{ path: s
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     if (!/^[0-9a-fA-F-]{36}\.json$/.test(entry.name)) throw new McpToolError("state_corrupt", "Invalid execution filename");
     const relative = `executions/${entry.name}`;
-    files.push({ path: relative, raw: await readFile(path.join(directory, relative), "utf8") });
+    countContinuity("receiptReads");
+    files.push({ path: relative, raw: await measureContinuity("receiptReadMs", () => readFile(path.join(directory, relative), "utf8")) });
   }
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }

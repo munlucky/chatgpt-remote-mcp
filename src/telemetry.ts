@@ -3,10 +3,21 @@ import { appendFile, mkdir, rename, stat, unlink, writeFile } from "node:fs/prom
 import path from "node:path";
 import type { Correlation } from "./telemetry-correlation.js";
 import { serializeUsageEvent } from "./telemetry-schema.js";
+import type { ContinuityMetrics } from "./continuity/metrics.js";
+
+export interface ProcessReadMetrics {
+  running: boolean; hasMore?: boolean; outputBytes?: number; droppedOutputBytes?: number;
+  waitMode?: "output" | "terminal"; requestedWaitMs?: number; effectiveWaitMs?: number; drainOnly?: boolean;
+  requestedAfterSeq?: number; nextSeq?: number; responseElapsedMs?: number; responseBudgetMs?: number; responseDeadlineExceeded?: boolean;
+  persistenceVerification?: "not_required" | "verified" | "pending"; persistenceState?: "ok" | "degraded";
+  outputAvailability?: "unavailable";
+}
 
 export interface RequestMetrics {
+  signal?: AbortSignal;
+  continuity?: ContinuityMetrics;
   correlation?: Correlation;
-  processRead?: { running: boolean; hasMore: boolean; outputBytes: number; droppedOutputBytes: number };
+  processRead?: ProcessReadMetrics;
   clientClass?: "codex" | "openai_mcp" | "other";
   requestId?: string;
   trafficClass?: "probe" | "usage";
@@ -22,6 +33,7 @@ export const requestMetrics = new AsyncLocalStorage<RequestMetrics>();
 export { safeRpcName } from "./telemetry-schema.js";
 
 export interface UsageEvent {
+  continuity?: ContinuityMetrics;
   schemaVersion?: number;
   bootId?: string;
   correlation?: Correlation;

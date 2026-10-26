@@ -1,8 +1,8 @@
+import { countContinuity, measureContinuity } from "./metrics.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import type {
   FileFingerprint,
@@ -10,7 +10,13 @@ import type {
   WorkspaceObservation,
 } from "./task-types.js";
 
-const execFileAsync = promisify(execFile);
+interface ObservationBudget { deadline: number; signal: AbortSignal }
+function checkBudget(budget: ObservationBudget): number {
+  budget.signal.throwIfAborted();
+  const remaining = budget.deadline - performance.now();
+  if (remaining <= 0) throw Object.assign(new Error("Workspace observation budget exceeded"), { code: "ABORT_ERR" });
+  return Math.max(1, Math.floor(remaining));
+}
 
 export interface WorkspaceSnapshotLimits {
   maxFiles: number;
@@ -27,27 +33,32 @@ interface GitSnapshot {
   changed: Array<{ status: string; path: string }>;
 }
 
-async function git(cwd: string, args: string[], maxBuffer = 2 * 1024 * 1024): Promise<string> {
-  const result = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer,
-    windowsHide: true,
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+async function git(cwd: string, args: string[], budget: ObservationBudget, maxBuffer = 2 * 1024 * 1024): Promise<string> {
+  return measureContinuity("gitMs", async () => {
+    const timeout = checkBudget(budget);
+    let child: ReturnType<typeof execFile>;
+    const output = new Promise<string>((resolve, reject) => {
+      child = execFile("git", args, {cwd, encoding:"utf8", maxBuffer, windowsHide:true,
+        timeout, signal:budget.signal, killSignal:"SIGKILL", env:{...process.env,GIT_OPTIONAL_LOCKS:"0"}},
+        (error, stdout) => error ? reject(error) : resolve(stdout));
+    });
+    const closed = new Promise<void>(resolve => child!.once("close", () => resolve()));
+    try { const result = await output; checkBudget(budget); return result; }
+    finally { await closed; }
   });
-  return result.stdout;
 }
 
-async function inspectGit(root: string): Promise<GitSnapshot> {
+async function inspectGit(root: string, budget: ObservationBudget): Promise<GitSnapshot> {
   let head: string | null = null;
   let unborn = false;
   try {
-    head = (await git(root, ["rev-parse", "HEAD"])).trim() || null;
+    head = (await git(root, ["rev-parse", "HEAD"], budget)).trim() || null;
   } catch {
+    checkBudget(budget);
     unborn = true;
   }
-  const branchRaw = (await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
-  const statusRaw = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const branchRaw = (await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], budget).catch(() => { checkBudget(budget); return ""; })).trim();
+  const statusRaw = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], budget);
   const records = statusRaw.split("\0");
   const changed: Array<{ status: string; path: string }> = [];
   for (let index = 0; index < records.length; index += 1) {
@@ -77,6 +88,7 @@ async function inspectGit(root: string): Promise<GitSnapshot> {
 async function stagedObjectId(
   root: string,
   entry: { status: string; path: string },
+  deadline: ObservationBudget,
 ): Promise<string | null> {
   const indexStatus = entry.status[0];
   if (!indexStatus || indexStatus === " " || indexStatus === "?" || indexStatus === "!") {
@@ -85,8 +97,9 @@ async function stagedObjectId(
   const output = await git(
     root,
     ["ls-files", "--stage", "-z", "--", entry.path],
+    deadline,
     64 * 1024,
-  ).catch(() => "");
+  ).catch(() => { checkBudget(deadline); return ""; });
   const first = output.split("\0")[0] ?? "";
   const match = /^\d+\s+([0-9a-f]+)\s+\d+\t/.exec(first);
   return match?.[1] ?? null;
@@ -97,7 +110,7 @@ async function fingerprintFile(
   entry: { status: string; path: string },
   budget: { files: number; bytes: number },
   limits: WorkspaceSnapshotLimits,
-  startedAt: number,
+  deadline: ObservationBudget,
 ): Promise<{ fingerprint: FileFingerprint; complete: boolean; reason?: string }> {
   if (budget.files >= limits.maxFiles) {
     return {
@@ -114,7 +127,7 @@ async function fingerprintFile(
       reason: "file_budget_exceeded",
     };
   }
-  if (Date.now() - startedAt >= limits.maxDurationMs) {
+  if (performance.now() >= deadline.deadline) {
     return {
       fingerprint: {
         path: entry.path,
@@ -130,14 +143,16 @@ async function fingerprintFile(
     };
   }
 
-  const indexObjectId = await stagedObjectId(root, entry);
+  const indexObjectId = await stagedObjectId(root, entry, deadline);
   const absolute = path.join(root, entry.path);
   try {
     const info = await lstat(absolute);
+    checkBudget(deadline);
     budget.files += 1;
     const mode = `0${(info.mode & 0o7777).toString(8)}`;
     if (info.isSymbolicLink()) {
       const target = await readlink(absolute);
+      checkBudget(deadline);
       const sha256 = createHash("sha256").update(target).digest("hex");
       return {
         fingerprint: {
@@ -181,7 +196,8 @@ async function fingerprintFile(
         reason: "byte_budget_exceeded",
       };
     }
-    const data = await readFile(absolute);
+    const data = await readFile(absolute, {signal: deadline.signal});
+    checkBudget(deadline);
     budget.bytes += data.length;
     return {
       fingerprint: {
@@ -250,72 +266,82 @@ export async function observeWorkspace(
   limits: WorkspaceSnapshotLimits,
 ): Promise<WorkspaceObservation> {
   const startedAt = Date.now();
-  const observedAt = new Date(startedAt).toISOString();
-  const reasons = new Set<string>();
-  const files: FileFingerprint[] = [];
-  let head: string | null = null;
-  let unborn = false;
-  let branch: string | null = null;
-  let detached = false;
-  let statusDigest = createHash("sha256").update("").digest("hex");
-  const budget = { files: 0, bytes: 0 };
+  const monotonicStart = performance.now();
+  const controller = new AbortController();
+  const deadline = { deadline: monotonicStart + limits.maxDurationMs, signal:controller.signal };
+  const timer = setTimeout(() => controller.abort(), limits.maxDurationMs);
+  try {
+    const observedAt = new Date(startedAt).toISOString();
+    const reasons = new Set<string>();
+    const files: FileFingerprint[] = [];
+    let head: string | null = null;
+    let unborn = false;
+    let branch: string | null = null;
+    let detached = false;
+    let statusDigest = createHash("sha256").update("").digest("hex");
+    const budget = { files: 0, bytes: 0 };
 
-  if (identity.repository && identity.gitRoot) {
-    try {
-      const before = await inspectGit(identity.gitRoot);
-      head = before.head;
-      unborn = before.unborn;
-      branch = before.branch;
-      detached = before.detached;
-      statusDigest = createHash("sha256").update(before.statusRaw).digest("hex");
-      for (const entry of before.changed) {
-        const result = await fingerprintFile(identity.gitRoot, entry, budget, limits, startedAt);
-        files.push(result.fingerprint);
-        if (!result.complete && result.reason) reasons.add(result.reason);
-        if (Date.now() - startedAt >= limits.maxDurationMs) {
-          reasons.add("time_budget_exceeded");
-          break;
+    if (identity.repository && identity.gitRoot) {
+      try {
+        const before = await inspectGit(identity.gitRoot, deadline);
+        head = before.head;
+        unborn = before.unborn;
+        branch = before.branch;
+        detached = before.detached;
+        statusDigest = createHash("sha256").update(before.statusRaw).digest("hex");
+        for (const entry of before.changed) {
+          const result = await fingerprintFile(identity.gitRoot, entry, budget, limits, deadline);
+          files.push(result.fingerprint);
+          if (!result.complete && result.reason) reasons.add(result.reason);
+          if (performance.now() >= deadline.deadline) {
+            reasons.add("time_budget_exceeded");
+            break;
+          }
         }
+        const after = await inspectGit(identity.gitRoot, deadline);
+        const afterDigest = createHash("sha256").update(after.statusRaw).digest("hex");
+        if (after.head !== before.head || afterDigest !== statusDigest) {
+          reasons.add("concurrent_change");
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "git_error";
+        reasons.add(controller.signal.aborted || performance.now() >= deadline.deadline ? "time_budget_exceeded" : `git_error:${code}`);
       }
-      const after = await inspectGit(identity.gitRoot);
-      const afterDigest = createHash("sha256").update(after.statusRaw).digest("hex");
-      if (after.head !== before.head || afterDigest !== statusDigest) {
-        reasons.add("concurrent_change");
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? "git_error";
-      reasons.add(`git_error:${code}`);
+    } else {
+      reasons.add("non_git_unscanned");
     }
-  } else {
-    reasons.add("non_git_unscanned");
-  }
 
-  const completedAt = new Date().toISOString();
-  const completeness: WorkspaceObservation["completeness"] = reasons.size === 0
-    ? "complete"
-    : files.length > 0 || identity.repository
-      ? "partial"
-      : "unknown";
-  const base: Omit<WorkspaceObservation, "fingerprint"> = {
-    observedAt,
-    completedAt,
-    repository: identity.repository,
-    head,
-    unborn,
-    branch,
-    detached,
-    worktreeIdentity: identity.worktreeIdentity,
-    statusDigest,
-    files,
-    completeness,
-    reasons: [...reasons].sort(),
-    inspectedFiles: budget.files,
-    inspectedBytes: budget.bytes,
-    maxFiles: limits.maxFiles,
-    maxBytes: limits.maxBytes,
-    maxDurationMs: limits.maxDurationMs,
-  };
-  return { ...base, fingerprint: observationFingerprint(base) };
+    const completedAt = new Date().toISOString();
+    const completeness: WorkspaceObservation["completeness"] = reasons.size === 0
+      ? "complete"
+      : files.length > 0 || identity.repository
+        ? "partial"
+        : "unknown";
+    const base: Omit<WorkspaceObservation, "fingerprint"> = {
+      observedAt,
+      completedAt,
+      repository: identity.repository,
+      head,
+      unborn,
+      branch,
+      detached,
+      worktreeIdentity: identity.worktreeIdentity,
+      statusDigest,
+      files,
+      completeness,
+      reasons: [...reasons].sort(),
+      inspectedFiles: budget.files,
+      inspectedBytes: budget.bytes,
+      maxFiles: limits.maxFiles,
+      maxBytes: limits.maxBytes,
+      maxDurationMs: limits.maxDurationMs,
+    };
+    return { ...base, fingerprint: observationFingerprint(base) };
+  } finally {
+    clearTimeout(timer);
+    countContinuity("observationMs",performance.now()-monotonicStart);
+    if (performance.now() >= deadline.deadline) countContinuity("observationCleanupMs",performance.now()-deadline.deadline);
+  }
 }
 
 export function compareWorkspace(

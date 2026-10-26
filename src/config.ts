@@ -32,6 +32,7 @@ export interface AppConfig {
   maxOutputBytes: number;
   defaultProcessOutputBytes: number;
   defaultProcessYieldMs: number;
+  processReadWaitMaxMs: number;
   maxRetainedProcessOutputBytes: number;
   maxTotalRetainedProcessOutputBytes: number;
   processRetentionMs: number;
@@ -320,6 +321,7 @@ export function loadConfig(
     maxOutputBytes,
     defaultProcessOutputBytes,
     defaultProcessYieldMs: parseInteger(env.MCP_DEFAULT_PROCESS_YIELD_MS, 750, "MCP_DEFAULT_PROCESS_YIELD_MS", 0, 30_000),
+    processReadWaitMaxMs: parseInteger(env.MCP_PROCESS_READ_WAIT_MAX_MS, 60_000, "MCP_PROCESS_READ_WAIT_MAX_MS", 1_000, 300_000),
     maxRetainedProcessOutputBytes,
     maxTotalRetainedProcessOutputBytes,
     processRetentionMs: parseInteger(

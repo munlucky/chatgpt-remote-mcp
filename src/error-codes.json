@@ -1,0 +1,6 @@
+[
+  "file_missing", "permission_denied", "replacement_mismatch", "patch_check_failed", "patch_apply_failed",
+  "process_session_unknown", "revision_conflict", "idempotency_conflict", "tracking_required",
+  "completion_checkpoint_conflict", "unresolved_execution", "persistence_unavailable", "storage_full",
+  "state_corrupt", "spawn_failed", "timed_out", "process_error", "other"
+]

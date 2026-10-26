@@ -48,6 +48,12 @@ export function analyze(events, selected, since, until) {
       logical.get(operation).add(key);
     }
   }
+  // Legacy events with invalid/missing identity remain visible as unlinked
+  // evidence. They cannot form a trusted lifecycle or disclose arbitrary IDs.
+  for (const e of selected.filter(e => ['process_started','process_terminal'].includes(e.event) && !processKey(e))) {
+    integrity.push({bootId:null,sessionId:null,correlation:null,state:'legacy_or_untracked',duplicateEvents:null,
+      start:e.event==='process_started'?e:null,terminal:e.event==='process_terminal'?e:null});
+  }
   const requests = selected.filter(e => e.event === 'mcp_request');
   for (const e of requests) if (logicalKey(e) && !logical.has(logicalKey(e))) logical.set(logicalKey(e), new Set());
   const tasks = new Map();
@@ -91,6 +97,16 @@ export function analyze(events, selected, since, until) {
     microExecutions: { measuredTerminal: durations.length, atMostFiveSeconds: durations.filter(n => n <= 5000).length,
       ratio: durations.length ? durations.filter(n => n <= 5000).length / durations.length : null },
     polling: { readProcessCalls: reads.length, perExecution,
+      metadata: Object.fromEntries(['waitMode','persistenceVerification','persistenceState','outputAvailability','drainOnly','responseDeadlineExceeded'].map(key => [key, {
+        denominator:reads.length, unobserved:reads.filter(e=>e.processRead?.[key] == null).length,
+        values:Object.fromEntries([...new Set(reads.map(e=>e.processRead?.[key]).filter(v=>v!=null))].map(value=>[value,reads.filter(e=>e.processRead?.[key]===value).length]))
+      }])),
+      timing: Object.fromEntries(['requestedWaitMs','effectiveWaitMs','responseElapsedMs','responseBudgetMs'].map(key => {
+        const values=reads.map(e=>e.processRead?.[key]).filter(Number.isFinite);
+        return [key,{samples:values.length,unobserved:reads.length-values.length,p50:percentile(values,.5),p95:percentile(values,.95)}];
+      })),
+      cursor: {observed:reads.filter(e=>Number.isSafeInteger(e.processRead?.requestedAfterSeq)&&Number.isSafeInteger(e.processRead?.nextSeq)).length,
+        zeroWait:reads.filter(e=>e.processRead?.effectiveWaitMs===0).length},
       unlinkedCalls: reads.filter(e => !e.correlation?.sessionId).length,
       readProcessPerExecution: selectedKeys.size ? reads.length / selectedKeys.size : null },
     output: { generatedBytes: sum(ended.map(e => e.totalOutputBytes).filter(Number.isFinite)),
@@ -137,13 +153,13 @@ export async function compareReceipts(entries, stateDirectory) {
     };
     try {
       if (await pendingJournal()) return { ...entry, receipt: 'pending_journal_inconclusive' };
-      const state = validateWorkspace(JSON.parse(await readFile(path.join(workspace, 'state.json'), 'utf8')));
+      const stateFile = path.join(workspace, 'state.json');
+      const stateBefore = await readFile(stateFile,'utf8');
+      const state = validateWorkspace(JSON.parse(stateBefore));
       if (!state || state.workspace.workspaceId !== workspaceId || !state.tasks[entry.correlation.taskId]) return { ...entry, receipt: 'owner_unknown' };
       const first = await readFile(file, 'utf8'); let result = classify(JSON.parse(first));
-      if (result.endsWith('mismatch')) {
-        const second = await readFile(file, 'utf8');
-        result = second !== first ? 'changed_during_observation' : classify(JSON.parse(second));
-      }
+      const second = await readFile(file, 'utf8');
+      if (second !== first || await readFile(stateFile,'utf8') !== stateBefore) result = 'changed_during_observation';
       if (await pendingJournal()) result = 'pending_journal_inconclusive';
       return { ...entry, receipt: result };
     } catch (error) { return { ...entry, receipt: error.code === 'ENOENT' ? 'missing_unknown' : 'unreadable_unknown' }; }

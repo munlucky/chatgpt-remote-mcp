@@ -3,6 +3,7 @@ import path from "node:path";
 import * as z from "zod/v4";
 
 import { bindRequest } from "./telemetry-correlation.js";
+import { requestMetrics } from "./telemetry.js";
 import type { AppConfig } from "./config.js";
 import { McpToolError } from "./errors.js";
 import type { ExecutionRecorder } from "./continuity/execution-recorder.js";
@@ -20,26 +21,60 @@ import {
 
 const DEFAULT_PROCESS_POLL_AFTER_MS = 1000;
 const RECOVERY_OUTPUT_BYTES = 16 * 1024;
+const PROCESS_RESPONSE_POSTPROCESS_MS = 5_000;
+type PersistenceVerification = "not_required" | "verified" | "pending";
+interface PollPolicy { waitMode: "output" | "terminal"; waitMs: number; maxOutputBytes: number }
+interface ReadResponseBudget { deadline: number; signal?: AbortSignal }
+
+// This limits response waiting. The manager still owns and awaits the one
+// terminal write; timing out here never cancels or restarts persistence.
+function withinResponseBudget<T>(operation: Promise<T>, budget?: ReadResponseBudget): Promise<T | undefined> {
+  if (!budget) return operation;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (value: T | undefined, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      budget.signal?.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve(value);
+    };
+    const abort = () => finish(undefined, budget.signal?.reason ?? new Error("Response aborted"));
+    const expire = () => {
+      const remaining = budget.deadline - performance.now();
+      if (remaining > 0) timer = setTimeout(expire, Math.ceil(remaining));
+      else finish(undefined);
+    };
+    let timer = setTimeout(expire, Math.max(0, Math.ceil(budget.deadline - performance.now())));
+    budget.signal?.addEventListener("abort", abort, { once: true });
+    operation.then(value => finish(value), error => finish(undefined, error));
+    if (budget.signal?.aborted) abort();
+  });
+}
 
 function processResult(
   result: Awaited<ReturnType<ProcessManager["read"]>>,
-  tracking?: { taskId: string; operationId: string; executionState?: string; persistenceState?: string } | undefined,
+  tracking?: { taskId: string; operationId: string; executionState?: string; persistenceState?: string; persistenceVerification?: PersistenceVerification } | undefined,
+  policy?: PollPolicy,
 ): Record<string, unknown> {
   // The manager's workspace binding is internal. Keep IDs visible to clients,
   // including clients which consume only the text content block.
   const { tracking: _binding, ...process } = result;
   const safeTerminal = !result.running && !result.hasMore && result.exitCode === 0
     && result.signal === null && result.timedOut === false
-    && tracking?.executionState === "exited" && tracking.persistenceState === "ok";
-  const nextCall = result.running || result.hasMore
+    && tracking?.executionState === "exited" && tracking.persistenceState === "ok"
+    && tracking.persistenceVerification === "verified";
+  const nextCall = result.running || result.hasMore || tracking?.persistenceVerification === "pending"
     ? {
         tool: "read_process",
         arguments: {
           sessionId: result.sessionId,
           afterSeq: result.nextSeq,
-          waitMode: result.waitMode ?? "output",
-          waitMs: result.hasMore ? 0 : DEFAULT_PROCESS_POLL_AFTER_MS,
-          maxOutputBytes: RECOVERY_OUTPUT_BYTES,
+          waitMode: policy?.waitMode ?? result.waitMode ?? "output",
+          waitMs: policy?.waitMs ?? DEFAULT_PROCESS_POLL_AFTER_MS,
+          maxOutputBytes: policy?.maxOutputBytes ?? RECOVERY_OUTPUT_BYTES,
+          drainOnly: result.hasMore,
+          ...(tracking ? {taskId:tracking.taskId,operationId:tracking.operationId} : {}),
         },
       }
     : tracking && !safeTerminal
@@ -49,13 +84,14 @@ function processResult(
     ...process,
     status: result.running ? "accepted" : "completed",
     completed: !result.running,
+    persistenceVerification: tracking?.persistenceVerification ?? "not_required",
     ...(result.running ? { pollAfterMs: DEFAULT_PROCESS_POLL_AFTER_MS } : {}),
     ...(nextCall ? { nextCall } : {}),
     ...(tracking
       ? {
           taskId: tracking.taskId,
           operationId: tracking.operationId,
-          executionState: tracking.executionState ?? (result.running ? "running" : "exited"),
+          executionState: tracking.executionState,
           persistenceState: tracking.persistenceState,
         }
       : {}),
@@ -73,6 +109,8 @@ function receiptReplayResult(record: ExecutionRecord): Record<string, unknown> {
     running: record.state === "running",
     completed,
     duplicate: true,
+    persistenceVerification: completed ? "verified" : "pending",
+    outputAvailability: "unavailable",
     exitCode: record.exitCode,
     signal: record.signal,
     timedOut: record.timedOut,
@@ -114,32 +152,44 @@ async function trackedProcessResult(
   taskId: string,
   operationId: string,
   workspaceId: string,
+  budget?: ReadResponseBudget,
+  policy?: PollPolicy,
 ): Promise<Record<string, unknown>> {
-  if (!result.running) {
-    await processManager.waitForTerminalHooks(result.sessionId);
-  }
-  const receipt = await executionRecorder.store.readExecution(workspaceId, operationId);
+  const receipt = await withinResponseBudget((async () => {
+    if (!result.running) await processManager.waitForTerminalHooks(result.sessionId);
+    const receipt = await executionRecorder.store.readExecution(workspaceId, operationId);
+    if (!receipt || receipt.taskId !== taskId || receipt.workspaceId !== workspaceId
+      || receipt.operationId !== operationId || receipt.sessionId !== result.sessionId
+      || receipt.bootId !== executionRecorder.store.bootId) {
+      throw new McpToolError("state_corrupt", "Managed process receipt ownership mismatch");
+    }
+    return receipt;
+  })(), budget);
   bindRequest({ taskId, operationId, workspaceId, sessionId: result.sessionId, executionBootId: receipt?.bootId ?? executionRecorder.store.bootId });
   return processResult(result, {
     taskId,
     operationId,
-    executionState: receipt?.state ?? (result.running ? "running" : "unknown"),
-    persistenceState: receipt?.persistenceState ?? "degraded",
-  });
+    executionState: receipt?.state,
+    persistenceState: receipt?.persistenceState,
+    persistenceVerification: result.running ? "not_required"
+      : receipt && (receipt.state === "exited" || receipt.state === "spawn_failed") ? "verified" : "pending",
+  }, policy);
 }
 
 async function observedProcessResult(
   processManager: ProcessManager,
   executionRecorder: ExecutionRecorder,
   result: Awaited<ReturnType<ProcessManager["read"]>>,
+  budget?: ReadResponseBudget,
+  policy?: PollPolicy,
 ): Promise<Record<string, unknown>> {
   const binding = result.tracking;
   return binding
     ? trackedProcessResult(
         processManager, executionRecorder, result,
-        binding.taskId, binding.operationId, binding.workspaceId,
+        binding.taskId, binding.operationId, binding.workspaceId, budget, policy,
       )
-    : processResult(result);
+    : processResult(result, undefined, policy);
 }
 
 const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
@@ -151,6 +201,8 @@ const PROCESS_RESULT_FORMATTER: SuccessResultFormatter = {
       operationId: data.operationId,
       executionState: data.executionState,
       persistenceState: data.persistenceState,
+      persistenceVerification: data.persistenceVerification,
+      outputAvailability: data.outputAvailability,
       duplicate: data.duplicate,
       status: data.status,
       running: data.running,
@@ -592,8 +644,11 @@ export function registerExecTools(
         "Read a managed process for output and terminal state. waitMode=output returns on new output or exit; terminal waits for exit or the wait budget. Successful durable termination with drained output has no automatic context lookup. Process exit is not task completion. Read including its task/operation IDs and durable execution state when tracked. Follow nextCall; pass the previous nextSeq as afterSeq to receive only newer output. Process completion is not task completion. Use list_processes for compact status without output.",
       inputSchema: {
         sessionId: sessionIdSchema,
+        taskId: taskIdSchema,
+        operationId: operationIdSchema,
         afterSeq: afterSeqSchema,
         waitMode: z.enum(["output", "terminal"]).default("output").describe("output wakes on new output or exit; terminal ignores output notifications and waits for exit or waitMs. Both preserve cursors and output limits."),
+        drainOnly: z.boolean().default(false).describe("Read retained output immediately for this call. Preserve waitMode/waitMs for subsequent polling."),
         waitMs: z
           .number()
           .int()
@@ -608,19 +663,45 @@ export function registerExecTools(
       annotations: TOOL_ANNOTATIONS.readOnlyClosed,
       _meta: authMetadata,
     },
-    async ({ sessionId, afterSeq, waitMode, waitMs, maxOutputBytes }) =>
-      runProcessTool(async () =>
-        observedProcessResult(
-          processManager,
-          executionRecorder,
-          await processManager.read(sessionId, {
-            afterSeq,
-            waitMs,
-            waitMode,
-            maxOutputBytes,
-          }),
-        ),
-      ),
+    async ({ sessionId, taskId, operationId, afterSeq, waitMode, waitMs, drainOnly, maxOutputBytes }, extra) => {
+      const responseStartedAt = performance.now();
+      const effectiveWaitMs = drainOnly ? 0 : Math.min(waitMs, config.processReadWaitMaxMs);
+      const deadline = responseStartedAt + effectiveWaitMs + PROCESS_RESPONSE_POSTPROCESS_MS;
+      const signals = [extra.signal, requestMetrics.getStore()?.signal].filter((s): s is AbortSignal => Boolean(s));
+      const signal = AbortSignal.any(signals);
+      const responseMetadata = () => ({waitMode,requestedWaitMs:waitMs,effectiveWaitMs,drainOnly,requestedAfterSeq:afterSeq,
+        responseElapsedMs:performance.now()-responseStartedAt,responseBudgetMs:effectiveWaitMs+PROCESS_RESPONSE_POSTPROCESS_MS,
+        responseDeadlineExceeded:performance.now()>=deadline});
+      return runProcessTool(async () => {
+        if (Boolean(taskId) !== Boolean(operationId)) throw new McpToolError("idempotency_conflict", "Provide taskId and operationId together");
+        const known = taskId ? processManager.list().find(entry => entry.sessionId === sessionId) : undefined;
+        if (known && (!known.tracking || known.tracking.taskId !== taskId || known.tracking.operationId !== operationId)) {
+          throw new McpToolError("process_session_unknown", "Session does not match the selected execution. Inspect existing work context; do not restart.");
+        }
+        let result: Awaited<ReturnType<ProcessManager["read"]>>;
+        try {
+          result = await processManager.read(sessionId, { afterSeq, waitMs: effectiveWaitMs, waitMode, maxOutputBytes, signal });
+        } catch (error) {
+          if (!(error instanceof McpToolError) || error.code !== "process_session_unknown" || !taskId || !operationId) throw error;
+          // Select the stored owner before binding correlation. UUID syntax is not ownership proof.
+          const recovered = await withinResponseBudget((async () => {
+            const found = await executionRecorder.store.findTask(taskId);
+            const receipt = found ? await executionRecorder.store.readExecution(found.state.workspace.workspaceId, operationId) : null;
+            if (!receipt || receipt.taskId !== taskId || receipt.operationId !== operationId
+              || receipt.sessionId !== sessionId || receipt.bootId !== executionRecorder.store.bootId) throw error;
+            return receipt;
+          })(), {deadline,signal});
+          if (!recovered) throw new McpToolError("persistence_unavailable", "Receipt recovery could not be verified within the response deadline. Inspect existing work context; do not restart the operation.");
+          bindRequest({...recovered,executionBootId:recovered.bootId});
+          return {...receiptReplayResult(recovered),duplicate:false,...responseMetadata()};
+        }
+        if (taskId && (!result.tracking || result.tracking.taskId !== taskId || result.tracking.operationId !== operationId)) {
+          throw new McpToolError("process_session_unknown", "Session does not match the selected execution. Inspect existing work context; do not restart.");
+        }
+        const observed = await observedProcessResult(processManager, executionRecorder, result, { deadline, signal }, {waitMode,waitMs,maxOutputBytes});
+        return { ...observed,...responseMetadata() };
+      });
+    },
   );
 
   if (!onlyTool || onlyTool === "terminate_process") server.registerTool(

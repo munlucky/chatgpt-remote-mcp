@@ -1,3 +1,5 @@
+import errorCodes from "./error-codes.json" with { type: "json" };
+
 export class McpToolError extends Error {
   constructor(
     readonly code: string,
@@ -9,12 +11,7 @@ export class McpToolError extends Error {
   }
 }
 
-const loggedErrorCodes = new Set([
-  "file_missing", "permission_denied", "replacement_mismatch", "patch_check_failed", "patch_apply_failed",
-  "process_session_unknown", "revision_conflict", "idempotency_conflict", "tracking_required",
-  "completion_checkpoint_conflict", "unresolved_execution", "persistence_unavailable", "storage_full",
-  "state_corrupt", "spawn_failed", "timed_out", "process_error", "other",
-]);
+const loggedErrorCodes = new Set(errorCodes);
 
 export function safeErrorCode(code: unknown): string {
   if (code === "ENOENT") return "file_missing";

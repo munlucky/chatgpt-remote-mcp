@@ -168,6 +168,7 @@ export interface StartProcessRequest {
 }
 
 export interface ReadProcessRequest {
+  signal?: AbortSignal | undefined;
   waitMode?: "output" | "terminal" | undefined;
   afterSeq?: number | undefined;
   waitMs?: number | undefined;
@@ -344,11 +345,13 @@ export class ProcessManager {
     const managed = this.#require(sessionId);
     bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     const afterSeq = Math.max(0, request.afterSeq ?? 0);
+    request.signal?.throwIfAborted();
     const waitMs = Math.max(0, request.waitMs ?? 0);
     if (waitMs > 0) {
-      if (request.waitMode === "terminal") await this.waitForExit(sessionId, waitMs);
-      else await this.#waitForOutput(managed, afterSeq, waitMs);
+      if (request.waitMode === "terminal") await this.waitForExit(sessionId, waitMs, request.signal);
+      else await this.#waitForOutput(managed, afterSeq, waitMs, request.signal);
     }
+    request.signal?.throwIfAborted();
 
     const maxOutputBytes = Math.max(
       OUTPUT_CHUNK_BYTES,
@@ -435,7 +438,7 @@ export class ProcessManager {
     }
   }
 
-  async waitForExit(sessionId: string, waitMs: number): Promise<void> {
+  async waitForExit(sessionId: string, waitMs: number, signal?: AbortSignal): Promise<void> {
     const managed = this.#require(sessionId);
     bindRequest({ ...managed.tracking, sessionId, executionBootId: this.#options.bootId ?? null, unlinkedReason: managed.tracking ? null : "untracked" });
     if (!this.#isRunning(managed) || waitMs <= 0) {
@@ -449,12 +452,14 @@ export class ProcessManager {
         }
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
         managed.exitWaiters.delete(finish);
         resolve();
       };
       const timer = setTimeout(finish, waitMs);
       managed.exitWaiters.add(finish);
-      if (!this.#isRunning(managed)) {
+      signal?.addEventListener("abort", finish, { once: true });
+      if (signal?.aborted || !this.#isRunning(managed)) {
         finish();
       }
     });
@@ -594,7 +599,7 @@ export class ProcessManager {
   #require(sessionId: string): ManagedProcess {
     const managed = this.#processes.get(sessionId);
     if (!managed) {
-      throw new McpToolError("process_session_unknown", `Unknown process session: ${sessionId}`);
+      throw new McpToolError("process_session_unknown", "Unknown process session. Stop repeated polling. Inspect existing work context, then use the original taskId and operationId to recover its receipt. Do not restart an uncertain execution.");
     }
     return managed;
   }
@@ -794,6 +799,7 @@ export class ProcessManager {
     managed: ManagedProcess,
     afterSeq: number,
     waitMs: number,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (managed.outputBuffer.latestSeq > afterSeq || !this.#isRunning(managed)) {
       return Promise.resolve();
@@ -806,12 +812,14 @@ export class ProcessManager {
         }
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
         managed.waiters.delete(finish);
         resolve();
       };
       const timer = setTimeout(finish, waitMs);
       managed.waiters.add(finish);
-      if (managed.outputBuffer.latestSeq > afterSeq || !this.#isRunning(managed)) {
+      signal?.addEventListener("abort", finish, { once: true });
+      if (signal?.aborted || managed.outputBuffer.latestSeq > afterSeq || !this.#isRunning(managed)) {
         finish();
       }
     });

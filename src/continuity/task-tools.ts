@@ -83,14 +83,14 @@ export function registerTaskTools(
         format: z.enum(["summary", "full"]).default("summary").describe("Compact recovery summary by default. full returns bounded checkpoint details, file fingerprints and execution receipts. Summary omissions are explicit; they never authorize retries or completion."),
         recentExecutionLimit: z.number().int().min(1).max(50).default(10).describe("Maximum recent terminal execution receipts returned. Unsettled executions are returned independently."),
         candidateLimit: z.number().int().min(1).max(100).default(20).describe("Maximum active workspace candidates returned when neither cwd nor taskId is supplied."),
-        cursor: z.string().max(128).optional().describe("Reserved bounded-list cursor. Current v1 responses return nextCursor=null when no further page is available."),
+        cursor: z.string().max(128).optional().describe("Task-bound unsettled execution cursor from the preceding response. Omit on the first page."),
       },
       annotations: TOOL_ANNOTATIONS.readOnlyClosed,
       _meta: authMetadata,
     },
-    async ({ cwd, taskId, recentExecutionLimit, candidateLimit, format }) =>
+    async ({ cwd, taskId, recentExecutionLimit, candidateLimit, format, cursor }) =>
       runTool(async () => ({
-        ...await service.context({ cwd, taskId, recentExecutionLimit, candidateLimit, format }),
+        ...await service.context({ cwd, taskId, recentExecutionLimit, candidateLimit, format, cursor }),
         executionTracking: config.executionTracking,
       })),
   );

@@ -67,11 +67,11 @@ export async function runHarnessSmoke(options = {}) {
       return { ...result, stdout, duplicate };
     };
     const cli = async (args, json = true) => {
-      const script = `import{spawnSync}from'node:child_process';const r=spawnSync(${JSON.stringify(options.executable)},${JSON.stringify([...prefix,...args])},{encoding:'utf8',windowsHide:true,timeout:60000});process.stdout.write(JSON.stringify({code:r.status,error:r.error?.code??null,stdout:r.stdout??''}));`;
+      const script = `import{spawnSync}from'node:child_process';const r=spawnSync(${JSON.stringify(options.executable)},${JSON.stringify([...prefix,...args])},{encoding:'utf8',windowsHide:true,timeout:60000});let errorCode;try{const e=JSON.parse(r.stderr||'{}');if(typeof e.errorCode==='string'&&/^[a-z0-9_]+$/.test(e.errorCode))errorCode=e.errorCode}catch{}process.stdout.write(JSON.stringify({code:r.status,error:r.error?.code??null,stdout:r.stdout??'',errorCode}));`;
       const process = await execute(script);
       const result = JSON.parse(process.stdout);
       if (result.error === 'ENOENT') return { status:'absent' };
-      if (result.code !== 0) return { status:'command_failed', exitCode:result.code };
+      if (result.code !== 0) return { status:'command_failed', exitCode:result.code, errorCode:result.errorCode };
       return json ? JSON.parse(result.stdout) : { status:'help', text:result.stdout };
     };
     phase = 'public_help';
