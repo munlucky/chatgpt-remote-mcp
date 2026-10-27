@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -66,6 +67,37 @@ describe("native host executor contract", () => {
     expect(() => mapContainerPathToHost("/outside/project", mappings)).toThrow(
       "not covered",
     );
+  });
+
+  it("preserves POSIX host paths for macOS", () => {
+    const mappings = parseHostPathMappings("/shared=/Users/dev/work space;/host/home=/Users/dev");
+    expect(mapContainerPathToHost("/shared/project/sub", mappings)).toBe("/Users/dev/work space/project/sub");
+    expect(mapContainerPathToHost("/host/home/.codex", mappings)).toBe("/Users/dev/.codex");
+  });
+
+  it.skipIf(process.platform === "win32")("manages a POSIX companion through the shared queue", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mcp-posix-manager-"));
+    cleanupPaths.push(root);
+    const scripts = path.join(root, "scripts");
+    const shared = path.join(root, "shared");
+    await mkdir(scripts);
+    await mkdir(shared);
+    for (const file of ["host-executor-posix.mjs", "host-executor.mjs"]) {
+      await copyFile(path.resolve("scripts", file), path.join(scripts, file));
+    }
+    await writeFile(path.join(root, ".env"), `SHARED_PATH="${shared}"\nMCP_HOST_EXECUTOR_ENABLED=true\n`);
+    const manager = path.join(scripts, "host-executor-posix.mjs");
+    const run = (action: string) => promisify(execFile)(process.execPath, [manager, action], {
+      env: { ...process.env, MCP_BUILD_ID: "manager-test" },
+    });
+    try {
+      expect((await run("start")).stdout).toContain("healthy");
+      expect((await run("status")).stdout).toContain("healthy");
+      expect((await run("start")).stdout).toContain("already healthy");
+    } finally {
+      await run("stop");
+    }
+    expect((await run("status")).stdout).toContain("stopped");
   });
 
   it("requires a fresh compatible agent heartbeat before host execution", async () => {

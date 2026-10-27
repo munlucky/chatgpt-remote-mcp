@@ -64,7 +64,7 @@ The MCP server publishes 25 tools, including bounded `read_files` batching, gene
 `publish_file` artifact delivery, and three durable continuity tools:
 `get_work_context`, `checkpoint_work`, and `complete_work`.
 
-### Native Windows host execution
+### Native host execution
 
 `exec_command` normally runs inside the Linux workmachine exactly as before. An
 optional `executionTarget=host` mode runs the same tracked command through a small
@@ -95,6 +95,32 @@ Enabling this feature expands `exec_command` from container permissions to the
 permissions of the Windows user running `scripts/start.ps1`. Enable it only on a host
 where the MCP authentication and shared-directory permissions are trusted. It is an
 execution boundary, not an OS sandbox or an approval mechanism.
+
+On macOS, install Node.js 22 or later on the native host and use a checkout of
+this repository on the host. Configure `.env` with absolute macOS paths for
+`SHARED_PATH` and `HOST_USER_HOME`, and set `MCP_HOST_EXECUTOR_ENABLED=true`.
+The container's `/shared` bind mount must refer to the same directory as
+`SHARED_PATH` on the Mac. When Docker runs in Lima, verify that the VM exposes
+that directory and that container and host can both read and write the queue.
+The POSIX manager uses the default queue path.
+
+From a macOS terminal in that checkout:
+
+```sh
+export MCP_BUILD_ID="$(node scripts/build-id.mjs .)"
+node scripts/host-executor-posix.mjs start
+node scripts/host-executor-posix.mjs status
+# Rebuild and recreate the service so it receives the new code and configuration.
+docker compose up -d --build
+# To stop the companion later:
+node scripts/host-executor-posix.mjs stop
+```
+
+Select `executionTarget=host` explicitly and use a working directory under a
+configured container mount such as `/shared`, `/workspace`, or `/host/home`.
+Host commands run with the Mac user's permissions and environment. The manager
+refuses to stop a stale or invalid status and never force-kills an unverified PID.
+Inspect the queue and `agent-launch.log` if startup or shutdown fails.
 
 ### Published artifacts
 

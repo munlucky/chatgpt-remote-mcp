@@ -74,7 +74,7 @@ export function mapContainerPathToHost(
     if (!covered) continue;
     if (relative === "") return mapping.hostRoot;
     const segments = relative.split("/").filter(Boolean);
-    return path.win32.isAbsolute(mapping.hostRoot)
+    return !path.posix.isAbsolute(mapping.hostRoot) && path.win32.isAbsolute(mapping.hostRoot)
       ? path.win32.join(mapping.hostRoot, ...segments)
       : path.posix.join(mapping.hostRoot, ...segments);
   }
