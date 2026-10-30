@@ -335,3 +335,7 @@ excluded from Git and Docker build inputs.
 MIT. This project incorporates code from `kstost/cokacremote`.
 See [upstream provenance](UPSTREAM.md) and the preserved
 [upstream license](templates/UPSTREAM-LICENSE).
+
+## Independent Kernel review
+
+Moonremote can check reviewer availability and run a fresh read-only Codex review through the official Kernel receipt path. See [configuration, execution, and recovery](docs/kernel-review.md). Enable the optional integration before tasks that require independent security review.

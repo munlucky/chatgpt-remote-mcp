@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { findPublicSecretLeaks } from './public-secret-scan.mjs';
 
 const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
 const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
@@ -11,12 +12,6 @@ const env = Object.fromEntries(readFileSync('.env', 'utf8').split(/\r?\n/).filte
   const index = line.indexOf('=');
   return [line.slice(0, index), line.slice(index + 1).replace(/^['"]|['"]$/g, '')];
 }));
-const privateKeys = [
-  'MCP_PUBLIC_URL', 'SHARED_PATH', 'HOST_USER_HOME', 'CODEX_PROFILE_PATH', 'CODEX_PROFILE_TARGET',
-  'KERNEL_PROFILE_PATH', 'KERNEL_PROFILE_TARGET', 'HOST_HOME_ALIAS', 'HOST_HOME_SECONDARY_ALIAS',
-  'MCP_STATE_VOLUME', 'MCP_USAGE_VOLUME', 'MCP_HOME_VOLUME', 'MCP_PROBE_CWD', 'CLOUDFLARE_TUNNEL_TOKEN',
-  'MCP_OAUTH_APPROVAL_KEY', 'MCP_AUTH_TOKEN', 'MCP_PROBE_SECRET', 'MCP_OPERATOR_APPROVAL_KEY',
-];
 const example = readFileSync('.env.example', 'utf8');
 const compose = readFileSync('docker-compose.yml', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
@@ -37,13 +32,10 @@ if (
 ) {
   throw new Error('Nginx client-IP trust boundary drifted');
 }
-const values = privateKeys.map((key) => env[key]).filter((value) => value && value.length >= 8 && !example.includes(value));
 const files = [...new Set(execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean))];
-const findings = [];
-for (const file of files) {
-  const text = readFileSync(file, 'utf8');
-  if (values.some((value) => text.toLowerCase().includes(value.toLowerCase()))) findings.push(file);
-}
+// Deployment paths and public URLs are not credentials. Real credential values
+// are scanned across tracked and untracked public files, including tests/docs.
+const findings = findPublicSecretLeaks(env, example, files.map(file => ({ path: file, content: readFileSync(file, 'utf8') })));
 if (findings.length) throw new Error(`Private configuration found in public files: ${findings.join(', ')}`);
 console.log(JSON.stringify({
   publicConfigVerified: true,

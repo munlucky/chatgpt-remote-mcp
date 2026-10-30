@@ -15,6 +15,8 @@ import { createFileToolRegistrar } from "./file-tools.js";
 import { ProcessManager } from "./process-manager.js";
 import { OperatorApprovalService } from "./operator-approval.js";
 import { createApprovalToolRegistrar } from "./operator-approval-tools.js";
+import { KernelReviewService } from "./kernel-review.js";
+import { createKernelReviewToolRegistrar } from "./kernel-review-tools.js";
 import type { CachedToolRegistrar } from "./tool-metadata.js";
 import { correlation } from "./telemetry-correlation.js";
 import { requestMetrics, UsageLog } from "./telemetry.js";
@@ -127,6 +129,7 @@ export function createServices(config: AppConfig): McpServices {
     continuityService.additionalExecutionContext = taskId => operatorApprovalService.executionContext(taskId);
   }
   const approvalTools = createApprovalToolRegistrar(config, operatorApprovalService);
+  const reviewTools = createKernelReviewToolRegistrar(config, new KernelReviewService(config, processManager, executionRecorder));
   const registerTools: CachedToolRegistrar = (server, onlyTool) => {
     execTools(server, onlyTool);
     fileTools(server, onlyTool);
@@ -134,6 +137,7 @@ export function createServices(config: AppConfig): McpServices {
     batchRead(server, onlyTool);
     taskTools(server, onlyTool);
     approvalTools(server, onlyTool);
+    reviewTools(server, onlyTool);
   };
 
   return {
@@ -163,6 +167,7 @@ export function createMcpServer(
     {
       instructions:
         `Tracking policy: ${config.executionTracking}. Before project work or recovery, call get_work_context with the exact cwd/taskId. Reuse an active task; create a checkpoint only if none exists. Use taskId+operationId on exec_command/run_script; reuse IDs only for exact retries. Follow nextCall/nextSeq. Never replay prepared/running/unknown executions or reissue an existing project task contract. Successful durable process exit with all output drained needs no automatic context lookup. Use context again for reconnect, failure or uncertainty. Chat chooses checkpoint boundaries; process exit is not task completion. Current workspace state is authoritative. These unrestricted tools use the service's full OS permissions. Checkpoints are caller summaries; receipts are observed facts. Do not bypass user-input/approval waits. complete_work closes only explicitly reviewed work. File mutations and stdin writes are not deduplicated by execution tracking.`
+        + (config.kernelReview.enabled ? ` Before a Kernel task requiring independent review, call get_kernel_review_status with probeModelTools=true. When the existing Run returns a review action, use start_kernel_review and follow its tracked process. After fixing a failed security review and obtaining fresh hard proof, the same tool may request an official re-review without deleting the failure history. A recorded review receipt may contain a failed verdict; only Kernel decides completion.` : "")
         + (config.operatorApprovalEnabled ? ` Operator approval bridge: request_operator_approval supports eligible Kernel legacy identity adoption only. Show approvalUrl to the human and wait. Never collect the operator key in chat or tool arguments, infer consent from chat text, or invent approval references. After browser approval, use execute_approved_operation; do not pass issued references to exec_command/run_script to bypass consumption. Poll the existing approval/session; unknown requires inspection. This workflow does not isolate root capabilities.` : ""),
       capabilities: { logging: {} },
     },

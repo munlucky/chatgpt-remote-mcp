@@ -12,6 +12,7 @@ export interface AppConfig {
   operatorApprovalTtlSeconds: number;
   hostExecutor: HostExecutorConfig;
   kernelHome: string;
+  kernelReview: { enabled: boolean; target: "local" | "host"; codexExecutable: string; timeoutMs: number };
   host: string;
   port: number;
   endpoint: string;
@@ -284,6 +285,14 @@ export function loadConfig(
       ),
     },
     kernelHome: path.resolve(env.MOON_RELAY_KERNEL_HOME?.trim() || path.join(os.homedir(), ".moon-relay-kernel")),
+    kernelReview: {
+      enabled: parseBoolean(env.MCP_KERNEL_REVIEW_ENABLED, false),
+      target: (() => { const value = env.MCP_KERNEL_REVIEW_TARGET || "local";
+        if (value !== "local" && value !== "host") throw new Error("MCP_KERNEL_REVIEW_TARGET must be local or host");
+        return value; })(),
+      codexExecutable: env.MCP_KERNEL_REVIEW_CODEX?.trim() || "codex",
+      timeoutMs: parseInteger(env.MCP_KERNEL_REVIEW_TIMEOUT_MS, 600000, "MCP_KERNEL_REVIEW_TIMEOUT_MS", 30000, 1800000),
+    },
     probeSecret: env.MCP_PROBE_SECRET?.trim() || undefined,
     usageLogDir: env.MCP_USAGE_LOG_DIR?.trim() || undefined,
     usageLogMaxBytes: parseInteger(env.MCP_USAGE_LOG_MAX_BYTES, 10 * 1024 * 1024, "MCP_USAGE_LOG_MAX_BYTES", 4096, 100 * 1024 * 1024),

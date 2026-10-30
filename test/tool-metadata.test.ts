@@ -28,6 +28,13 @@ async function listTools(env: NodeJS.ProcessEnv) {
 }
 
 describe("tool authentication metadata", () => {
+  it("publishes the two independent review tools only when configured", async () => {
+    const tools = await listTools({ MCP_AUTH_TOKEN: "test", MCP_KERNEL_REVIEW_ENABLED: "true" });
+    expect(tools).toHaveLength(27);
+    expect(tools.find(tool => tool.name === "get_kernel_review_status")?.annotations?.readOnlyHint).toBe(true);
+    const start = tools.find(tool => tool.name === "start_kernel_review")!;
+    expect(Object.keys(start.inputSchema.properties ?? {})).toEqual(["cwd", "runId", "taskId", "operationId"]);
+  });
   it("advertises the OAuth scope on every tool when OAuth is enabled", async () => {
     const tools = await listTools({
       MCP_OAUTH_ENABLED: "true",

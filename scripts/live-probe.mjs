@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import { verifyContinuitySmoke } from './continuity-smoke.mjs';
+import { catalogFeaturesFromEnv, validateOptionalToolCatalog } from './kernel-review-catalog.mjs';
 const base = 'http://127.0.0.1:3000';
 const publicBase = process.env.MCP_PUBLIC_URL;
 const probeCwd = process.env.MCP_PROBE_CWD || '/opt/chatgpt-remote-mcp';
@@ -52,12 +53,8 @@ try {
     body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/list', params: {} }),
   }), 200);
   const catalog = (await catalogResponse.json()).result?.tools;
-  const approvalsEnabled = ['1', 'true', 'yes', 'on'].includes((process.env.MCP_OPERATOR_APPROVAL_ENABLED || '').toLowerCase());
-  if (!Array.isArray(catalog) || catalog.length !== (approvalsEnabled ? 28 : 25)) throw new Error('Public tool catalog is incomplete');
+  const optionalCatalogEvidence = validateOptionalToolCatalog(catalog, catalogFeaturesFromEnv(process.env));
   if (!catalog.some(tool => tool.name === 'publish_file')) throw new Error('Artifact publishing tool not advertised: publish_file');
-  if (approvalsEnabled) for (const name of ['request_operator_approval', 'get_operator_approval', 'execute_approved_operation']) {
-    if (!catalog.some(tool => tool.name === name)) throw new Error(`Operator approval tool not advertised: ${name}`);
-  }
   for (const name of ['get_work_context', 'checkpoint_work', 'complete_work']) {
     if (!catalog.some(tool => tool.name === name)) throw new Error(`Continuity tool not advertised: ${name}`);
   }
@@ -68,7 +65,7 @@ try {
   const terminalSchema = catalog.find(tool => tool.name === 'complete_work')?.inputSchema?.properties?.finalCheckpoint;
   if (!terminalSchema?.properties?.current || terminalSchema.properties.current.maxLength !== 2048
     || terminalSchema.properties.evidenceRefs || terminalSchema.properties.executionReconciliations) throw new Error('Terminal checkpoint schema is incomplete');
-  catalogEvidence = { publicToolCount: catalog.length, continuityToolsAdvertised: true, executionTrackingAdvertised: true,
+  catalogEvidence = { ...optionalCatalogEvidence, publicToolCount: catalog.length, continuityToolsAdvertised: true, executionTrackingAdvertised: true,
     finalCheckpointAdvertised: true, negotiatedProtocolVersion: protocolVersion, serverCatalogVerified: true,
     realClientVerified: false, toolCatalogDigest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex') };
   }

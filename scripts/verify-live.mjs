@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, realpathSync } from 'node:fs';
+import { catalogFeaturesFromEnv, expectedToolCount } from './kernel-review-catalog.mjs';
 
 const projectRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 process.chdir(projectRoot);
@@ -56,8 +57,12 @@ if (helper.enabled) {
 }
 
 const result = JSON.parse(execFileSync('docker', ['exec', container, 'node', '/opt/chatgpt-remote-mcp/scripts/live-probe.mjs', '--terminal-smoke'], { encoding: 'utf8' }));
+const catalogFeatures = catalogFeaturesFromEnv(env);
 if (
   result.buildId !== buildId ||
+  result.publicToolCount !== expectedToolCount(catalogFeatures) ||
+  (catalogFeatures.kernelReviewEnabled && !result.kernelReviewToolsAdvertised) ||
+  (catalogFeatures.operatorApprovalEnabled && !result.operatorApprovalToolsAdvertised) ||
   !result.finalCheckpointAdvertised || !result.negotiatedProtocolVersion || !result.serverCatalogVerified ||
   !result.terminalSmokeVerified ||
   !result.telemetry.enabled ||
