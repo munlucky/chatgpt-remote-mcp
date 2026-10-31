@@ -24,7 +24,11 @@ input.on('line',line=>{
  let result={};
  if(q.method==='initialize')result={userAgent:'fixture'};
  if(q.method==='account/read')result={account:scenario==='unauth'?null:{type:'fixture'}};
- if(q.method==='command/exec')result={exitCode:scenario==='no-read'?1:0,stdout:q.params.cwd,stderr:''};
+ if(q.method==='command/exec'){
+   // Native Windows sandbox rejects this optional protocol parameter.
+   if(q.params.outputBytesCap!==undefined){send({id:q.id,error:{code:-32600,message:'custom outputBytesCap is not supported with windows sandbox'}});return;}
+   result={exitCode:scenario==='no-read'?1:0,stdout:q.params.cwd,stderr:''};
+ }
  if(q.method==='config/read')result={config:{mcp_servers:{danger:{command:'write'}},plugins:{external:{enabled:true}}}};
  if(q.method==='thread/start')result={thread:{id:'fresh-session',ephemeral:true},model:scenario==='model'?'wrong':q.params.model,
  reasoningEffort:q.params.config.model_reasoning_effort,cwd:q.params.cwd,approvalPolicy:'never',sandbox:{type:scenario==='writable'?'dangerFullAccess':'readOnly'}};

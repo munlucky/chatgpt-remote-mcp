@@ -18,7 +18,12 @@ it("measures actual context receipt reads and syncs in the existing request scop
     const metrics: RequestMetrics = {setupMs:null,toolMs:null,toolError:null};
     await requestMetrics.run(metrics,()=>service.continuityService.context({taskId:String(created.taskId),format:"summary"}));
     expect(metrics.continuity?.receiptReads).toBeGreaterThan(0);
-    expect(metrics.continuity?.syncCalls).toBeGreaterThan(0);
+    // Already-durable receipts do not repeat fsync on every context read.
+    expect(metrics.continuity?.syncCalls ?? 0).toBe(0);
+    await service.continuityService.store.invalidateWorkspace(prepared.record.workspaceId);
+    const revalidated: RequestMetrics = {setupMs:null,toolMs:null,toolError:null};
+    await requestMetrics.run(revalidated,()=>service.continuityService.context({taskId:String(created.taskId),format:"summary"}));
+    expect(revalidated.continuity?.syncCalls).toBeGreaterThan(0);
     expect(metrics.continuity?.taskLookupMs).toBeGreaterThan(0);
     expect(metrics.continuity?.evidenceMs).toBeGreaterThanOrEqual(0);
     const raw = JSON.stringify(serializeUsageEvent({event:"mcp_request",continuity:{...metrics.continuity,secret:"sentinel",receiptReads:-1,gitMs:Infinity}} as unknown as UsageEvent));

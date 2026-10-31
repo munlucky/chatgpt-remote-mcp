@@ -83,7 +83,7 @@ export async function initializeReviewRpc(rpc: ReviewRpc): Promise<void> {
 export async function checkReviewReadAccess(rpc: ReviewRpc, cwd: string): Promise<void> {
   const result = await rpc.request("command/exec", {
     command: ["node", "-e", "const fs=require('node:fs');fs.readdirSync(process.cwd());process.stdout.write(process.cwd())"],
-    cwd, sandboxPolicy: { type: "readOnly", networkAccess: false }, timeoutMs: 5000, outputBytesCap: 8192,
+    cwd, sandboxPolicy: { type: "readOnly", networkAccess: false }, timeoutMs: 5000,
   });
   if (result.exitCode !== 0 || result.stdout !== cwd) throw new Error("review_read_access_unavailable");
 }

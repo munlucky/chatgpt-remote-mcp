@@ -49,16 +49,26 @@ async function git(cwd: string, args: string[], budget: ObservationBudget, maxBu
 }
 
 async function inspectGit(root: string, budget: ObservationBudget): Promise<GitSnapshot> {
-  let head: string | null = null;
-  let unborn = false;
-  try {
-    head = (await git(root, ["rev-parse", "HEAD"], budget)).trim() || null;
-  } catch {
-    checkBudget(budget);
-    unborn = true;
-  }
-  const branchRaw = (await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], budget).catch(() => { checkBudget(budget); return ""; })).trim();
-  const statusRaw = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], budget);
+  // Independent Git reads share the same observation deadline. A second
+  // snapshot below still detects concurrent HEAD/status changes.
+  const [headRead, branchRead, statusRead] = await Promise.allSettled([
+    git(root, ["rev-parse", "HEAD"], budget)
+      .then(value => ({ head: value.trim() || null, unborn: false }))
+      .catch(() => { checkBudget(budget); return { head: null, unborn: true }; }),
+    git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], budget)
+      .catch(() => { checkBudget(budget); return ""; }),
+    git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], budget),
+  ]);
+  // Each read reaps its child before settling. Drain all reads even when one
+  // fails, so the shared deadline cannot leave another Git process behind.
+  if (headRead.status === "rejected") throw headRead.reason;
+  if (branchRead.status === "rejected") throw branchRead.reason;
+  if (statusRead.status === "rejected") throw statusRead.reason;
+  const headResult = headRead.value;
+  const branchResult = branchRead.value;
+  const statusRaw = statusRead.value;
+  const { head, unborn } = headResult;
+  const branchRaw = branchResult.trim();
   const records = statusRaw.split("\0");
   const changed: Array<{ status: string; path: string }> = [];
   for (let index = 0; index < records.length; index += 1) {

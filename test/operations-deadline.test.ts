@@ -63,6 +63,8 @@ it("bounds terminal persistence response waits without cancelling or duplicating
     let unlock!:()=>void,entered!:()=>void;
     const lockGate=new Promise<void>(resolve=>{unlock=resolve;}),lockReady=new Promise<void>(resolve=>{entered=resolve;});
     let held=false;
+    // Force a fresh on-disk durability check; warm receipts use prior proof.
+    await services.executionRecorder.store.invalidateWorkspace(receipt!.workspaceId);
     vi.mocked(fs.open).mockImplementation(async(file,flags,mode)=>{
       const handle=await actualFs.open(file,flags,mode);
       if(!held&&String(file).endsWith(`${operationId}.json`)&&flags==="r+"){
@@ -96,13 +98,15 @@ it("bounds terminal persistence response waits without cancelling or duplicating
 it.skipIf(process.platform==="win32")("kills and reaps a slow Git child within the two-second observation budget",async()=>{
   const root=await mkdtemp(path.join(os.tmpdir(),"mcp-git-deadline-"));
   const bin=path.join(root,"bin"),pidFile=path.join(root,"pid");await mkdir(bin);
-  await writeFile(path.join(bin,"git"),`#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000);\n`,{mode:0o755});
+  await writeFile(path.join(bin,"git"),`#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(pidFile)},String(process.pid)+'\\n');setInterval(()=>{},1000);\n`,{mode:0o755});
   vi.stubEnv("PATH",`${bin}${path.delimiter}${process.env.PATH}`);
   try {
     const start=performance.now();
     const result=await observeWorkspace({workspaceId:"a".repeat(32),executionRoot:root,gitRoot:root,gitCommonDir:path.join(root,".git"),worktreeIdentity:root,repository:true},{maxFiles:200,maxBytes:16777216,maxDurationMs:2000});
     expect(performance.now()-start).toBeLessThan(2500);
     expect(result.completeness).toBe("partial");expect(result.reasons).toContain("time_budget_exceeded");
-    const pid=Number(await readFile(pidFile,"utf8"));expect(()=>process.kill(pid,0)).toThrow();
+    const pids=(await readFile(pidFile,"utf8")).trim().split("\n").map(Number);
+    expect(pids).toHaveLength(3);
+    for(const pid of pids) expect(()=>process.kill(pid,0)).toThrow();
   } finally {vi.unstubAllEnvs();await rm(root,{recursive:true,force:true});}
 });

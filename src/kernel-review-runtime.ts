@@ -113,7 +113,7 @@ export async function runKernelReview(plan: ReviewPlan): Promise<Record<string, 
       if (plan.probeModelTools) {
         const probe = await budget.wait(() => executeReview(reviewer.rpc, {
           model: route.model, effort: route.effort, cwd: reviewer.cwd,
-          message: "Read-only runtime diagnostic. Use the execution tool to run pwd (or its Windows equivalent) in the repository. Return JSON {ok:true,cwd:<exact tool output>} only if it succeeded. If the tool failed return ok:false and its error as cwd. Do not inspect other files, change files, delegate, or invoke Kernel.",
+          message: 'Read-only runtime diagnostic. Use the execution tool to run node -p "process.cwd()" in the repository. Return JSON {ok:true,cwd:<trimmed command stdout>} only if it succeeded. If the tool failed return ok:false and its error as cwd. Do not inspect other files, change files, delegate, or invoke Kernel.',
           outputSchema: { type: "object", properties: { ok: { type: "boolean" }, cwd: { type: "string" } }, required: ["ok", "cwd"], additionalProperties: false },
         }, budget.signal));
         if (probe.successfulCommands < 1 || probe.outcome?.ok !== true || probe.outcome.cwd?.trim() !== reviewer.cwd) throw new Error("review_model_tool_access_unavailable");

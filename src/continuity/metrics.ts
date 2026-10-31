@@ -9,6 +9,7 @@ export interface ContinuityMetrics {
   receiptReadMs?: number;
   ownerValidationMs?: number;
   durabilityMs?: number;
+  storageLockWaitMs?: number;
   persistenceMs?: number;
   gitMs?: number;
   evidenceMs?: number;
@@ -17,7 +18,7 @@ export interface ContinuityMetrics {
 }
 
 export const continuityMetricKeys = ["indexHits","indexRebuilds","indexInvalidations","observationMs", "observationCleanupMs", "taskLookupMs", "receiptReadMs", "ownerValidationMs",
-  "durabilityMs", "persistenceMs", "gitMs", "evidenceMs", "receiptReads", "syncCalls"] as const;
+  "durabilityMs", "storageLockWaitMs", "persistenceMs", "gitMs", "evidenceMs", "receiptReads", "syncCalls"] as const;
 
 export function countContinuity(key: keyof ContinuityMetrics, value = 1): void {
   const request = requestMetrics.getStore();

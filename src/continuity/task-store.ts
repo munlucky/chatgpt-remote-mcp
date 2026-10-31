@@ -57,6 +57,8 @@ export class TaskStore {
   readonly #workspaceQueues = new Map<string, Promise<void>>();
   readonly #executionQueues = new Map<string, Promise<void>>();
   readonly #indexes = new Map<string, WorkspaceExecutionIndex>();
+  // A successful sync proves durability until this writer next replaces the file.
+  readonly #durableFiles = new Set<string>();
   readonly #storageQueue = new Map<string, Promise<void>>();
   #initialized = false;
   #initializing: Promise<void> | undefined;
@@ -141,6 +143,7 @@ export class TaskStore {
     this.#writerGuardHeld = false;
     this.#initialized = false;
     this.#indexes.clear();
+    this.#durableFiles.clear();
   }
 
   async inputHmac(value: unknown): Promise<string> {
@@ -180,7 +183,7 @@ export class TaskStore {
         }
         await this.#validateSelected(state, [], await this.#index(identity.workspaceId), file);
         // Confirm snapshot durability before callers return a dedupe result.
-        await syncFileAndParents(file, this.#options.stateDirectory);
+        await this.#confirmDurable(file);
         return state;
       } catch (error) {
         if (!isErrno(error, "ENOENT")) throw error;
@@ -200,7 +203,9 @@ export class TaskStore {
     return this.#withStorageLock(async () => {
       const body = `${JSON.stringify(state, null, 2)}\n`;
       const parsed = parseState(body, this.#statePath(state.workspace.workspaceId));
-      validateOwnership(parsed, await this.#executionRecords(state.workspace.workspaceId), "workspace write");
+      const index = await this.#index(state.workspace.workspaceId);
+      this.#validateIndexedOwners(parsed, index, "workspace write");
+      await this.#validateSelected(parsed, [], index, "workspace write");
       if (Buffer.byteLength(body) > this.#options.maxSnapshotBytes) {
         throw new McpToolError(
           "storage_full",
@@ -210,7 +215,6 @@ export class TaskStore {
       const directory = this.#workspaceDirectory(state.workspace.workspaceId);
       await mkdir(path.join(directory, "executions"), { recursive: true, mode: 0o700 });
       await this.#atomicWrite(this.#statePath(state.workspace.workspaceId), body, 0o600);
-      const index = await this.#index(state.workspace.workspaceId);
       index.tasks.clear();
       for (const id of Object.keys(parsed.tasks)) index.tasks.add(id);
     });
@@ -219,10 +223,15 @@ export class TaskStore {
   async commitWorkspace(state: WorkspaceState, records: ExecutionRecord[]): Promise<void> {
     return this.#withStorageLock(async () => {
       const directory = this.#workspaceDirectory(state.workspace.workspaceId);
-      parseState(JSON.stringify(state), "transaction state");
-      const all = await this.#executionRecords(state.workspace.workspaceId);
-      const replacements = new Map(records.map((record) => [record.operationId, record]));
-      validateOwnership(state, all.map((record) => replacements.get(record.operationId) ?? record), "transaction ownership");
+      const parsed = parseState(JSON.stringify(state), "transaction state");
+      const index = await this.#index(state.workspace.workspaceId);
+      this.#validateIndexedOwners(parsed, index, "transaction ownership");
+      const replacements = records.map(record => parseExecution(JSON.stringify(record), "transaction receipt"));
+      if (new Set(replacements.map(record => record.operationId)).size !== replacements.length) {
+        throw new McpToolError("state_corrupt", "Duplicate execution in transaction");
+      }
+      for (const record of replacements) this.#validateImmutableOwner(record, index, "transaction ownership");
+      await this.#validateSelected(parsed, replacements, index, "transaction ownership");
       const journal = await prepareJournal(directory, state, records);
       let growth = 0;
       for (const entry of journal.records) {
@@ -251,6 +260,8 @@ export class TaskStore {
   }
 
   async #recoverTransactionsLocked(): Promise<void> {
+    // Recovery may replace previously confirmed files.
+    this.#durableFiles.clear();
     for (const workspaceId of await this.#workspaceIds()) {
       await recoverJournals(this.#workspaceDirectory(workspaceId), workspaceId,
         (file, body, mode) => {
@@ -266,7 +277,9 @@ export class TaskStore {
 
   async #withStorageLock<T>(operation: () => Promise<T>): Promise<T> {
     await this.initialize();
+    const queuedAt = performance.now();
     return this.#serialize(this.#storageQueue, "store", async () => {
+      countContinuity("storageLockWaitMs", performance.now() - queuedAt);
       if (this.#offlineMaintenance) throw new McpToolError("persistence_unavailable", "Continuity store is closed for offline maintenance");
       // Recheck after taking the lock: a preceding commit may have failed
       // while this caller was queued. No read or write may bypass recovery.
@@ -275,16 +288,21 @@ export class TaskStore {
     });
   }
 
-  async #executionRecords(workspaceId: string): Promise<ExecutionRecord[]> {
-    return (await workspaceFiles(this.#workspaceDirectory(workspaceId)))
-      .filter((entry) => entry.path.startsWith("executions/"))
-      .map((entry) => {
-        const record = parseExecution(entry.raw, entry.path);
-        if (entry.path !== `executions/${record.operationId}.json` || record.workspaceId !== workspaceId) {
-          throw new McpToolError("state_corrupt", "Execution ownership mismatch");
-        }
-        return record;
-      });
+  // Boot/recovery scans validate all indexed owners. Normal mutations check
+  // only changed receipts and references, without reading every stored receipt.
+  #validateIndexedOwners(state: WorkspaceState, index: WorkspaceExecutionIndex, file: string): void {
+    for (const [taskId, operations] of index.byTask) {
+      if (operations.size > 0 && !Object.hasOwn(state.tasks, taskId)) {
+        throw new McpToolError("state_corrupt", "Execution owner missing: " + file);
+      }
+    }
+  }
+
+  #validateImmutableOwner(record: ExecutionRecord, index: WorkspaceExecutionIndex, file: string): void {
+    const existing = index.byOperation.get(record.operationId);
+    if (existing && existing.taskId !== record.taskId) {
+      throw new McpToolError("state_corrupt", "Execution owner changed: " + file);
+    }
   }
 
   async findTask(taskId: string): Promise<{ state: WorkspaceState; taskId: string } | null> {
@@ -297,7 +315,7 @@ export class TaskStore {
           const state = parseState(await readFile(file, "utf8"), file);
           if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
           await this.#validateSelected(state, [], await this.#index(workspaceId), file);
-          await syncFileAndParents(file, this.#options.stateDirectory);
+          await this.#confirmDurable(file);
           if (state.tasks[taskId]) return { state, taskId };
         } catch (error) {
           if (isErrno(error, "ENOENT")) continue;
@@ -321,7 +339,7 @@ export class TaskStore {
         if (state.workspace.workspaceId !== workspaceId) throw new McpToolError("state_corrupt", "Workspace ownership mismatch");
         await this.#validateSelected(state, [], await this.#index(workspaceId), file);
         if (!state.activeTaskId) continue;
-        await syncFileAndParents(file, this.#options.stateDirectory);
+        await this.#confirmDurable(file);
         const task = state.tasks[state.activeTaskId];
         if (!task || task.status !== "active") continue;
         candidates.push({
@@ -350,11 +368,27 @@ export class TaskStore {
     if (record.workspaceId !== workspaceId || record.operationId !== operationId) {
       throw new McpToolError("state_corrupt", "Execution record ownership mismatch");
     }
-    await syncFileAndParents(file, this.#options.stateDirectory);
+    await this.#confirmDurable(file);
     return record;
   }
 
-  async #validateSelected(state: WorkspaceState, selected: ExecutionRecord[], index: WorkspaceExecutionIndex, file: string): Promise<void> {
+  async #confirmDurable(file: string): Promise<void> {
+    if (this.#durableFiles.has(file)) return;
+    await syncFileAndParents(file, this.#options.stateDirectory);
+    this.#durableFiles.add(file);
+  }
+
+  #forgetWorkspaceDurability(workspaceId: string): void {
+    const directory = this.#workspaceDirectory(workspaceId) + path.sep;
+    for (const file of this.#durableFiles) {
+      if (file.startsWith(directory)) this.#durableFiles.delete(file);
+    }
+  }
+
+  async #validateSelected(
+    state: WorkspaceState, selected: ExecutionRecord[], index: WorkspaceExecutionIndex,
+    file: string, verifyReferencedFiles = true,
+  ): Promise<void> {
     const missing = new Set<string>();
     const records = new Map(selected.map(record => [record.operationId, record]));
     const refs = new Set<string>();
@@ -367,7 +401,7 @@ export class TaskStore {
     for (const record of selected) for (const ref of record.callerResolution?.evidenceRefs ?? []) {
       if (ref.kind === "receipt" && ref.operationId) refs.add(ref.operationId);
     }
-    for (const id of refs) if (!records.has(id)) {
+    for (const id of refs) if (verifyReferencedFiles && !records.has(id)) {
       const record = await this.#rawExecution(state.workspace.workspaceId, id);
       if (record) records.set(id, record); else missing.add(id);
     }
@@ -377,6 +411,7 @@ export class TaskStore {
 
   async #rebuildIndex(workspaceId: string): Promise<WorkspaceExecutionIndex> {
     countContinuity("indexRebuilds");
+    this.#forgetWorkspaceDurability(workspaceId);
     const files = await workspaceFiles(this.#workspaceDirectory(workspaceId));
     const state = validateWorkspaceFiles(files, workspaceId);
     const index = new WorkspaceExecutionIndex();
@@ -413,8 +448,12 @@ export class TaskStore {
     return this.#withStorageLock(async () => {
       const parsed = parseExecution(JSON.stringify(record), "execution write");
       const state = parseState(await readFile(this.#statePath(record.workspaceId), "utf8"), "execution owner");
-      const records = await this.#executionRecords(record.workspaceId);
-      validateOwnership(state, [...records.filter((entry) => entry.operationId !== record.operationId), parsed], "execution write");
+      const index = await this.#index(record.workspaceId);
+      this.#validateIndexedOwners(state, index, "execution write");
+      this.#validateImmutableOwner(parsed, index, "execution write");
+      // The indexed receipts were validated at boot/recovery; normal execution
+    // writes need only the changed record and its indexed ownership bindings.
+    await this.#validateSelected(state, [parsed], index, "execution write", false);
       const directory = path.dirname(this.#executionPath(record.workspaceId, record.operationId));
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await this.#atomicWrite(
@@ -422,7 +461,7 @@ export class TaskStore {
         `${JSON.stringify(record, null, 2)}\n`,
         0o600,
       );
-      (await this.#index(record.workspaceId)).publish(parsed);
+      index.publish(parsed);
     });
   }
 
@@ -437,7 +476,7 @@ export class TaskStore {
       records.push(record);
     }
     await this.#validateSelected(state, records, index, file);
-    await syncFileAndParents(file, this.#options.stateDirectory);
+    await this.#confirmDurable(file);
     return records;
   }
 
@@ -629,6 +668,8 @@ export class TaskStore {
 
   async #atomicWrite(file: string, body: string, mode: number): Promise<void> {
     const persistenceStarted = performance.now();
+    // Failed rename/directory sync must invalidate the prior durability proof.
+    this.#durableFiles.delete(file);
     const bytes = Buffer.byteLength(body);
     if (path.basename(file) === "state.json" && bytes > this.#options.maxSnapshotBytes) {
       throw new McpToolError("storage_full", "Workspace continuity snapshot exceeds its storage budget");
@@ -665,6 +706,7 @@ export class TaskStore {
         if (parent === directory) break;
         directory = parent;
       }
+      this.#durableFiles.add(file);
     } catch (error) {
       this.#failedWrites += 1;
       const relative = path.relative(this.#workspacesDirectory(), file).split(path.sep);
